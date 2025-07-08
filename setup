@@ -68,12 +68,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Source libraries after argument parsing
+# Source utilities library first
 source "$SCRIPT_DIR/lib/utils.sh"
-source "$SCRIPT_DIR/lib/state.sh"
 
-# Load configuration
+# Load configuration before sourcing state.sh (which depends on STATE_DIR)
 load_config "$SCRIPT_DIR/config/defaults.env"
+
+# Source state library after configuration is loaded
+source "$SCRIPT_DIR/lib/state.sh"
 
 # Main execution function
 main() {
