@@ -138,19 +138,19 @@ set_module_status() {
     if command -v jq >/dev/null 2>&1; then
         if [ "$status" = "running" ]; then
             jq --arg module "$module" --arg status "$status" --arg timestamp "$timestamp" \
-               '.last_updated = $timestamp | .current_module = $module | .modules[$module].status = $status | .modules[$module].last_attempt = $timestamp | .modules[$module].attempts += 1' \
+               '.last_updated = $timestamp | .current_module = $module | .modules[($module)].status = $status | .modules[($module)].last_attempt = $timestamp | .modules[($module)].attempts += 1' \
                "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
         elif [ "$status" = "completed" ]; then
             jq --arg module "$module" --arg status "$status" --arg timestamp "$timestamp" \
-               '.last_updated = $timestamp | .current_module = null | .modules[$module].status = $status | .modules[$module].completed_at = $timestamp' \
+               '.last_updated = $timestamp | .current_module = null | .modules[($module)].status = $status | .modules[($module)].completed_at = $timestamp' \
                "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
         elif [ "$status" = "failed" ]; then
             jq --arg module "$module" --arg status "$status" --arg timestamp "$timestamp" --arg error "$error_msg" \
-               '.last_updated = $timestamp | .current_module = null | .modules[$module].status = $status | .errors += [{"module": $module, "error": $error, "timestamp": $timestamp}]' \
+               '.last_updated = $timestamp | .current_module = null | .modules[($module)].status = $status | .errors += [{"module": $module, "error": $error, "timestamp": $timestamp}]' \
                "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
         else
             jq --arg module "$module" --arg status "$status" --arg timestamp "$timestamp" \
-               '.last_updated = $timestamp | .modules[$module].status = $status' \
+               '.last_updated = $timestamp | .modules[($module)].status = $status' \
                "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
         fi
     else
