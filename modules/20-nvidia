@@ -116,7 +116,7 @@ add_nvidia_repository() {
     fi
     
     # Update package lists
-    retry_with_backoff 3 5 sudo apt-get update
+    retry_with_backoff 3 5 false sudo apt-get update
     
     return 0
 }
@@ -139,7 +139,7 @@ install_nvidia_drivers() {
     log_info "Installing $driver_version..."
     
     # Use retry mechanism for driver installation
-    if ! retry_with_backoff 3 10 sudo apt-get install -y "$driver_version"; then
+    if ! retry_with_backoff 3 10 false sudo apt-get install -y "$driver_version"; then
         log_error "Failed to install $driver_version"
         
         # Try cleanup and retry once more
@@ -208,14 +208,14 @@ install_cuda_toolkit() {
     sudo cp /var/cuda-repo-ubuntu2204-*/cuda-*-keyring.gpg /usr/share/keyrings/ 2>/dev/null || true
     
     # Update package lists
-    retry_with_backoff 3 5 sudo apt-get update
+    retry_with_backoff 3 5 false sudo apt-get update
     
     # Install CUDA toolkit
     log_info "Installing CUDA toolkit packages..."
-    retry_with_backoff 3 10 sudo apt-get install -y cuda-toolkit-${cuda_version_major}-${cuda_version_minor}
+    retry_with_backoff 3 10 false sudo apt-get install -y cuda-toolkit-${cuda_version_major}-${cuda_version_minor}
     
     # Also install nvidia-cuda-toolkit for compatibility
-    retry_with_backoff 3 10 sudo apt-get install -y nvidia-cuda-toolkit
+    retry_with_backoff 3 10 false sudo apt-get install -y nvidia-cuda-toolkit
     
     # Clean up
     cd /
@@ -268,11 +268,11 @@ install_cudnn() {
     sudo cp /var/cudnn-local-repo-ubuntu2204-*/cudnn-*-keyring.gpg /usr/share/keyrings/ 2>/dev/null || true
     
     # Update package lists
-    retry_with_backoff 3 5 sudo apt-get update
+    retry_with_backoff 3 5 false sudo apt-get update
     
     # Install cuDNN
     log_info "Installing cuDNN packages..."
-    retry_with_backoff 3 10 sudo apt-get install -y cudnn
+    retry_with_backoff 3 10 false sudo apt-get install -y cudnn
     
     # Clean up
     cd /
