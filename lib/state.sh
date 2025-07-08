@@ -137,20 +137,20 @@ set_module_status() {
     
     if command -v jq >/dev/null 2>&1; then
         if [ "$status" = "running" ]; then
-            jq --arg module "$module" --arg status "$status" --arg timestamp "$timestamp" \
-               '.last_updated = $timestamp | .current_module = $module | setpath(["modules", $module, "status"]; $status) | setpath(["modules", $module, "last_attempt"]; $timestamp) | setpath(["modules", $module, "attempts"]; (getpath(["modules", $module, "attempts"]) + 1))' \
+            jq --arg modname "$module" --arg status "$status" --arg timestamp "$timestamp" \
+               '.last_updated = $timestamp | .current_module = $modname | setpath(["modules", $modname, "status"]; $status) | setpath(["modules", $modname, "last_attempt"]; $timestamp) | setpath(["modules", $modname, "attempts"]; (getpath(["modules", $modname, "attempts"]) + 1))' \
                "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
         elif [ "$status" = "completed" ]; then
-            jq --arg module "$module" --arg status "$status" --arg timestamp "$timestamp" \
-               '.last_updated = $timestamp | .current_module = null | setpath(["modules", $module, "status"]; $status) | setpath(["modules", $module, "completed_at"]; $timestamp)' \
+            jq --arg modname "$module" --arg status "$status" --arg timestamp "$timestamp" \
+               '.last_updated = $timestamp | .current_module = null | setpath(["modules", $modname, "status"]; $status) | setpath(["modules", $modname, "completed_at"]; $timestamp)' \
                "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
         elif [ "$status" = "failed" ]; then
-            jq --arg module "$module" --arg status "$status" --arg timestamp "$timestamp" --arg error "$error_msg" \
-               '.last_updated = $timestamp | .current_module = null | setpath(["modules", $module, "status"]; $status) | .errors += [{"module": $module, "error": $error, "timestamp": $timestamp}]' \
+            jq --arg modname "$module" --arg status "$status" --arg timestamp "$timestamp" --arg error "$error_msg" \
+               '.last_updated = $timestamp | .current_module = null | setpath(["modules", $modname, "status"]; $status) | .errors += [{"module": $modname, "error": $error, "timestamp": $timestamp}]' \
                "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
         else
-            jq --arg module "$module" --arg status "$status" --arg timestamp "$timestamp" \
-               '.last_updated = $timestamp | setpath(["modules", $module, "status"]; $status)' \
+            jq --arg modname "$module" --arg status "$status" --arg timestamp "$timestamp" \
+               '.last_updated = $timestamp | setpath(["modules", $modname, "status"]; $status)' \
                "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
         fi
     else
