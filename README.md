@@ -2,23 +2,12 @@
 
 **Production-grade, modular Ubuntu 22.04 deployment system with automatic recovery, reboot handling, and comprehensive logging.**
 
-## Features
-
-- **One-line remote installation**: `curl -fsSL https://your-domain.com/install.sh | bash`
-- **Automatic resume after failures or reboots**
-- **Network failure retry with exponential backoff**
-- **Idempotent operations** (safe to run multiple times)
-- **Zero manual intervention required**
-- **Comprehensive logging and state tracking**
-- **Automatic NVIDIA driver version detection**
-- **Modular architecture** for easy updates and maintenance
-
 ## Quick Start
 
 ### Remote Installation (Recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ubihere/ubivision-server-setup/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ubihere/ubivision-server-setup/master/install.sh | bash
 ```
 
 ### Local Installation
