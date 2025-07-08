@@ -165,7 +165,10 @@ sudo chmod +x "$INSTALL_DIR/lib"/*.sh
 cat > /tmp/ubivision-wrapper << EOF
 #!/bin/bash
 # UbiVision Server Setup Wrapper
-cd "$INSTALL_DIR"
+echo "DEBUG: Wrapper script starting..."
+echo "DEBUG: Changing to $INSTALL_DIR"
+cd "$INSTALL_DIR" || { echo "ERROR: Cannot change to $INSTALL_DIR"; exit 1; }
+echo "DEBUG: About to execute ./setup with args: \$@"
 exec ./setup "\$@"
 EOF
 sudo mv /tmp/ubivision-wrapper /usr/local/bin/ubivision-server-setup
