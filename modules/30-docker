@@ -64,7 +64,7 @@ add_docker_repository() {
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     
     # Update package lists
-    retry_with_backoff 3 5 sudo apt-get update
+    retry_with_backoff 3 5 false sudo apt-get update
     
     log_success "Docker repository added"
     return 0
@@ -177,7 +177,7 @@ install_nvidia_container_toolkit() {
     sudo apt-key add /tmp/nvidia-container-toolkit.gpg
     
     # Update package lists
-    retry_with_backoff 3 5 sudo apt-get update
+    retry_with_backoff 3 5 false sudo apt-get update
     
     # Install NVIDIA Container Toolkit
     install_packages nvidia-container-toolkit
