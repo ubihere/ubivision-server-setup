@@ -214,10 +214,19 @@ echo "  ubivision-server-setup --resume     - Resume after reboot"
 echo "  ubivision-server-setup --reset      - Reset deployment state"
 echo "  ubivision-server-setup --help       - Show help"
 echo
-echo "Starting deployment now..."
-echo "═══════════════════════════════════════════════════════════════"
+echo "To start deployment, run:"
+echo "  ubivision-server-setup"
 echo
+echo "═══════════════════════════════════════════════════════════════"
 
-# Start deployment
-cd "$INSTALL_DIR"
-exec ./setup
+# Only auto-start deployment if running interactively
+if [[ -t 0 ]]; then
+    echo
+    read -p "Start deployment now? (Y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        echo "Starting deployment..."
+        cd "$INSTALL_DIR"
+        exec ./setup
+    fi
+fi
