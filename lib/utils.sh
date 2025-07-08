@@ -169,10 +169,10 @@ install_packages() {
     log_info "Installing packages: ${packages[*]}"
     
     # Update package lists first
-    retry_with_backoff $MAX_RETRIES $RETRY_DELAY sudo apt-get update -y
+    retry_with_backoff $MAX_RETRIES $RETRY_DELAY false sudo apt-get update -y
     
     # Install packages
-    retry_with_backoff $MAX_RETRIES $RETRY_DELAY sudo apt-get install -y "${packages[@]}"
+    retry_with_backoff $MAX_RETRIES $RETRY_DELAY false sudo apt-get install -y "${packages[@]}"
 }
 
 # Service management
