@@ -11,12 +11,14 @@ MODULE_DESCRIPTION="Network configuration and services"
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Source libraries
+# Source utilities library first
 source "$SCRIPT_DIR/lib/utils.sh"
-source "$SCRIPT_DIR/lib/state.sh"
 
-# Load configuration
+# Load configuration before sourcing state.sh (which depends on STATE_DIR)
 load_config "$SCRIPT_DIR/config/defaults.env"
+
+# Source state library after configuration is loaded
+source "$SCRIPT_DIR/lib/state.sh"
 
 log_info "Starting module: $MODULE_DESCRIPTION"
 
