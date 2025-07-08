@@ -159,7 +159,7 @@ download_with_retry() {
     local output=$2
     local max_attempts=${3:-$MAX_RETRIES}
     
-    retry_with_backoff $max_attempts $RETRY_DELAY wget -O "$output" "$url" --timeout="$NETWORK_TIMEOUT" --tries=1
+    retry_with_backoff $max_attempts $RETRY_DELAY false wget -O "$output" "$url" --timeout="$NETWORK_TIMEOUT" --tries=1
 }
 
 # Package installation with retry
