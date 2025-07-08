@@ -69,13 +69,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Source utilities library first
+echo "DEBUG: Loading utils.sh..."
 source "$SCRIPT_DIR/lib/utils.sh"
+echo "DEBUG: Utils loaded, loading config..."
 
 # Load configuration before sourcing state.sh (which depends on STATE_DIR)
 load_config "$SCRIPT_DIR/config/defaults.env"
+echo "DEBUG: Config loaded, loading state.sh..."
 
 # Source state library after configuration is loaded
 source "$SCRIPT_DIR/lib/state.sh"
+echo "DEBUG: State loaded, starting main..."
 
 # Main execution function
 main() {
