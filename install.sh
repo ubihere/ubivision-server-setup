@@ -162,12 +162,13 @@ sudo chmod +x "$INSTALL_DIR/modules"/* 2>/dev/null || true
 sudo chmod +x "$INSTALL_DIR/lib"/*.sh
 
 # Create wrapper script for easy access
-sudo tee /usr/local/bin/ubivision-server-setup > /dev/null << EOF
+cat > /tmp/ubivision-wrapper << EOF
 #!/bin/bash
 # UbiVision Server Setup Wrapper
 cd "$INSTALL_DIR"
 exec ./setup "\$@"
 EOF
+sudo mv /tmp/ubivision-wrapper /usr/local/bin/ubivision-server-setup
 sudo chmod +x /usr/local/bin/ubivision-server-setup
 
 # Create auto-resume service

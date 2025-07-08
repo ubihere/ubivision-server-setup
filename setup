@@ -2,10 +2,13 @@
 # UbiVision Server Setup Main Script
 # =================================
 
+echo "DEBUG: Script started"
 set -euo pipefail
+echo "DEBUG: Set options applied"
 
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "DEBUG: Script directory: $SCRIPT_DIR"
 
 # Show help function (needs to be defined before argument parsing)
 show_help() {
