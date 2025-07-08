@@ -1,0 +1,380 @@
+#!/bin/bash
+# UbiVision Server Setup Main Script
+# =================================
+
+set -euo pipefail
+
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Show help function (needs to be defined before argument parsing)
+show_help() {
+    cat << EOF
+UbiVision Server Setup Script
+
+USAGE:
+    $0 [OPTIONS]
+
+OPTIONS:
+    --resume, -r        Resume from last checkpoint (used after reboot)
+    --reset, -R         Reset deployment state and start fresh
+    --status, -s        Show current deployment status
+    --verbose, -v       Enable verbose output
+    --help, -h          Show this help message
+
+EXAMPLES:
+    $0                  Start fresh deployment
+    $0 --resume         Resume deployment after reboot
+    $0 --status         Check deployment progress
+    $0 --reset          Reset and start over
+
+EOF
+}
+
+# Command line arguments
+RESUME_MODE=false
+RESET_STATE=false
+SHOW_STATUS=false
+VERBOSE=false
+
+# Parse command line arguments (do this first to handle --help)
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --resume|-r)
+            RESUME_MODE=true
+            shift
+            ;;
+        --reset|-R)
+            RESET_STATE=true
+            shift
+            ;;
+        --status|-s)
+            SHOW_STATUS=true
+            shift
+            ;;
+        --verbose|-v)
+            VERBOSE=true
+            shift
+            ;;
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Source libraries after argument parsing
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/state.sh"
+
+# Load configuration
+load_config "$SCRIPT_DIR/config/defaults.env"
+
+# Main execution function
+main() {
+    log "Starting UbiVision Server Setup"
+    
+    # Basic checks
+    check_not_root
+    check_sudo
+    
+    # Handle different modes
+    if [ "$SHOW_STATUS" = true ]; then
+        show_deployment_status
+        exit 0
+    fi
+    
+    if [ "$RESET_STATE" = true ]; then
+        reset_deployment_state
+        exit 0
+    fi
+    
+    # Initialize or load state
+    init_state
+    
+    # Acquire lock
+    if ! acquire_lock; then
+        log_error "Could not acquire deployment lock"
+        exit 1
+    fi
+    
+    # Handle resume mode
+    if [ "$RESUME_MODE" = true ]; then
+        handle_resume_mode
+    else
+        handle_normal_mode
+    fi
+    
+    # Run deployment
+    run_deployment
+}
+
+# Handle resume mode (after reboot)
+handle_resume_mode() {
+    log "Resuming deployment from last checkpoint"
+    
+    # Check if we need to clear reboot requirement
+    if is_reboot_required; then
+        local reboot_module=$(get_reboot_module)
+        log_info "Resuming after reboot required by module: $reboot_module"
+        clear_reboot_required
+        
+        # Validate that reboot was successful for NVIDIA module
+        if [ "$reboot_module" = "20-nvidia" ]; then
+            validate_nvidia_after_reboot
+        fi
+    fi
+    
+    # Wait for network connectivity
+    wait_for_internet 300
+}
+
+# Handle normal mode (fresh start)
+handle_normal_mode() {
+    log "Starting fresh deployment"
+    
+    # Check for existing state
+    local current_module=$(get_state "current_module")
+    if [ -n "$current_module" ] && [ "$current_module" != "null" ]; then
+        log_warn "Found existing deployment state"
+        show_status
+        
+        echo
+        read -p "Continue from last checkpoint? (y/N): " -n 1 -r
+        echo
+        
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Continuing from last checkpoint"
+            RESUME_MODE=true
+        else
+            log_info "Starting fresh deployment"
+            reset_state
+            init_state
+        fi
+    fi
+    
+    # Wait for network connectivity
+    wait_for_internet 300
+    
+    # Update system info
+    update_system_info
+}
+
+# Validate NVIDIA after reboot
+validate_nvidia_after_reboot() {
+    log_info "Validating NVIDIA drivers after reboot"
+    
+    # Give some time for drivers to initialize
+    sleep 10
+    
+    if validate_gpu; then
+        log_success "NVIDIA drivers working correctly after reboot"
+    else
+        log_error "NVIDIA drivers not working after reboot"
+        set_module_status "20-nvidia" "failed" "NVIDIA drivers not working after reboot"
+        exit 1
+    fi
+}
+
+# Run the deployment process
+run_deployment() {
+    log "Starting deployment process"
+    
+    # Get list of modules
+    local modules=("00-verify" "10-system" "20-nvidia" "30-docker" "40-network" "50-validate")
+    local total_modules=${#modules[@]}
+    local current_index=0
+    
+    # Find starting point
+    for i in "${!modules[@]}"; do
+        if ! is_module_completed "${modules[$i]}"; then
+            current_index=$i
+            break
+        fi
+    done
+    
+    # Run modules
+    for i in $(seq $current_index $((total_modules - 1))); do
+        local module="${modules[$i]}"
+        local module_file="$SCRIPT_DIR/modules/$module"
+        
+        if [ ! -f "$module_file" ]; then
+            log_error "Module file not found: $module_file"
+            exit 1
+        fi
+        
+        # Show progress
+        show_progress $((i + 1)) $total_modules "Running module: $module"
+        
+        # Set module status to running
+        set_module_status "$module" "running"
+        
+        # Run module
+        log_info "Executing module: $module"
+        if bash "$module_file"; then
+            set_module_status "$module" "completed"
+            log_success "Module $module completed successfully"
+            
+            # Check if reboot is required
+            if is_reboot_required; then
+                handle_reboot_requirement "$module"
+                break
+            fi
+        else
+            local exit_code=$?
+            set_module_status "$module" "failed" "Module exited with code $exit_code"
+            log_error "Module $module failed with exit code $exit_code"
+            exit $exit_code
+        fi
+    done
+    
+    # Check if all modules completed
+    if [ $current_index -eq $((total_modules - 1)) ] && is_module_completed "${modules[$((total_modules - 1))]}" && ! is_reboot_required; then
+        deployment_completed
+    fi
+}
+
+# Handle reboot requirement
+handle_reboot_requirement() {
+    local module=$1
+    
+    log_warn "Reboot required after module: $module"
+    
+    # Disable the auto-resume service temporarily to prevent boot loops
+    sudo systemctl disable ubivision-server-setup-resume 2>/dev/null || true
+    
+    # Re-enable it for the next boot
+    sudo systemctl enable ubivision-server-setup-resume
+    
+    echo
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "                    REBOOT REQUIRED"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo
+    echo "Module '$module' requires a system reboot to complete."
+    echo "The deployment will automatically resume after reboot."
+    echo
+    echo "Current progress: $(get_progress)"
+    echo
+    echo "The system will reboot in 10 seconds..."
+    echo "Press Ctrl+C to cancel the reboot and reboot manually later."
+    echo
+    echo "═══════════════════════════════════════════════════════════════"
+    
+    # Countdown
+    for i in {10..1}; do
+        echo -n "Rebooting in $i seconds... "
+        sleep 1
+        echo
+    done
+    
+    log_info "Rebooting system..."
+    sudo reboot
+}
+
+# Handle deployment completion
+deployment_completed() {
+    log_success "Deployment completed successfully!"
+    
+    # Disable auto-resume service
+    sudo systemctl disable ubivision-server-setup-resume 2>/dev/null || true
+    
+    # Update system info one final time
+    update_system_info
+    
+    # Show final status
+    show_final_status
+    
+    # Cleanup
+    cleanup_temp_files
+    
+    log "UbiVision Server Setup completed successfully"
+}
+
+# Show deployment status
+show_deployment_status() {
+    if [ ! -f "$STATE_FILE" ]; then
+        log_error "No deployment state found. Run '$0' to start deployment."
+        exit 1
+    fi
+    
+    show_status
+}
+
+# Reset deployment state
+reset_deployment_state() {
+    log_warn "Resetting deployment state"
+    
+    read -p "Are you sure you want to reset the deployment state? (y/N): " -n 1 -r
+    echo
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        reset_state
+        log_success "Deployment state reset successfully"
+    else
+        log_info "Reset cancelled"
+    fi
+}
+
+# Show final status
+show_final_status() {
+    local system_info=$(get_system_info)
+    
+    echo
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "                DEPLOYMENT COMPLETED SUCCESSFULLY"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo
+    echo "System Information:"
+    echo "------------------"
+    
+    if command -v jq >/dev/null 2>&1; then
+        echo "$system_info" | jq -r '
+        "Hostname: " + .hostname + "
+Username: " + .username + "
+IP Address: " + .ip_address + "
+MAC Address: " + .mac_address + "
+Ubuntu Version: " + .ubuntu_version + "
+Kernel Version: " + .kernel_version + "
+Total RAM: " + .total_ram + "
+Disk Size: " + .disk_size + "
+Timezone: " + .timezone + "
+Secure Boot: " + .secure_boot'
+    else
+        echo "System information available in: $STATE_FILE"
+    fi
+    
+    echo
+    echo "Next Steps:"
+    echo "----------"
+    echo "1. Connect to Tailscale: sudo tailscale up"
+    echo "2. Test GPU: nvidia-smi"
+    echo "3. Test Docker GPU: docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi"
+    
+    if [ "$(check_secure_boot)" = "enabled" ]; then
+        echo
+        echo "⚠️  WARNING: Secure Boot is enabled!"
+        echo "   NVIDIA drivers may not work properly."
+        echo "   Please disable Secure Boot in BIOS settings."
+    fi
+    
+    echo
+    echo "═══════════════════════════════════════════════════════════════"
+}
+
+# Handle script termination
+cleanup_on_exit() {
+    release_lock
+    cleanup_temp_files
+}
+
+# Set up signal handlers
+trap cleanup_on_exit EXIT INT TERM
+
+# Run main function
+main "$@"

@@ -1,0 +1,409 @@
+#!/bin/bash
+# Module 30: Docker Installation
+# ==============================
+
+set -euo pipefail
+
+# Module information
+MODULE_NAME="30-docker"
+MODULE_DESCRIPTION="Docker installation with GPU support"
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source libraries
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/state.sh"
+
+# Load configuration
+load_config "$SCRIPT_DIR/config/defaults.env"
+
+log_info "Starting module: $MODULE_DESCRIPTION"
+
+# Remove existing Docker installations
+remove_existing_docker() {
+    log_info "Removing existing Docker installations..."
+    
+    # Stop Docker services
+    sudo systemctl stop docker 2>/dev/null || true
+    sudo systemctl stop docker.socket 2>/dev/null || true
+    sudo systemctl stop containerd 2>/dev/null || true
+    
+    # Remove Docker packages
+    sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+    
+    # Remove Docker repository
+    sudo rm -f /etc/apt/sources.list.d/docker.list
+    sudo rm -f /etc/apt/keyrings/docker.gpg
+    
+    log_success "Existing Docker installation removed"
+    return 0
+}
+
+# Add Docker repository
+add_docker_repository() {
+    log_info "Adding Docker repository..."
+    
+    # Install prerequisites
+    install_packages ca-certificates curl gnupg lsb-release
+    
+    # Create keyrings directory
+    sudo mkdir -p /etc/apt/keyrings
+    
+    # Download Docker GPG key
+    local docker_gpg_url="https://download.docker.com/linux/ubuntu/gpg"
+    download_with_retry "$docker_gpg_url" "/tmp/docker.gpg"
+    
+    # Add GPG key
+    sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg < /tmp/docker.gpg
+    sudo chmod a+r /etc/apt/keyrings/docker.gpg
+    
+    # Add Docker repository
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    
+    # Update package lists
+    retry_with_backoff 3 5 sudo apt-get update
+    
+    log_success "Docker repository added"
+    return 0
+}
+
+# Install Docker Engine
+install_docker_engine() {
+    log_info "Installing Docker Engine..."
+    
+    # Install Docker packages
+    local docker_packages=(
+        "docker-ce"
+        "docker-ce-cli"
+        "containerd.io"
+        "docker-buildx-plugin"
+        "docker-compose-plugin"
+    )
+    
+    install_packages "${docker_packages[@]}"
+    
+    # Also install docker-compose for compatibility
+    install_packages docker-compose
+    
+    log_success "Docker Engine installed"
+    return 0
+}
+
+# Configure Docker daemon
+configure_docker_daemon() {
+    log_info "Configuring Docker daemon..."
+    
+    # Create Docker configuration directory
+    sudo mkdir -p /etc/docker
+    
+    # Create daemon.json configuration
+    local docker_config="/etc/docker/daemon.json"
+    backup_file "$docker_config"
+    
+    # Base configuration
+    local config='{
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+    },
+    "storage-driver": "overlay2",
+    "live-restore": true'
+    
+    # Add GPU support if NVIDIA drivers are present
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        log_info "Adding GPU support to Docker configuration"
+        config="$config,
+    \"default-runtime\": \"nvidia\",
+    \"runtimes\": {
+        \"nvidia\": {
+            \"path\": \"/usr/bin/nvidia-container-runtime\",
+            \"runtimeArgs\": []
+        }
+    }"
+    fi
+    
+    # Close configuration
+    config="$config
+}"
+    
+    # Write configuration
+    echo "$config" | sudo tee "$docker_config" > /dev/null
+    
+    log_success "Docker daemon configured"
+    return 0
+}
+
+# Configure Docker user permissions
+configure_docker_permissions() {
+    log_info "Configuring Docker user permissions..."
+    
+    # Create docker group if it doesn't exist
+    if ! getent group docker >/dev/null; then
+        sudo groupadd docker
+        log_info "Created docker group"
+    fi
+    
+    # Add current user to docker group
+    sudo usermod -aG docker "$USER"
+    
+    # Set proper permissions on Docker socket
+    sudo chmod 666 /var/run/docker.sock
+    
+    log_success "Docker user permissions configured"
+    return 0
+}
+
+# Install NVIDIA Container Toolkit
+install_nvidia_container_toolkit() {
+    log_info "Installing NVIDIA Container Toolkit..."
+    
+    # Check if NVIDIA drivers are present
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        log_warn "NVIDIA drivers not found, skipping NVIDIA Container Toolkit"
+        return 0
+    fi
+    
+    # Add NVIDIA Container Toolkit repository
+    local nvidia_repo_url="https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list"
+    curl -fsSL "$nvidia_repo_url" | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    
+    # Add GPG key
+    local nvidia_gpg_url="https://nvidia.github.io/libnvidia-container/gpgkey"
+    download_with_retry "$nvidia_gpg_url" "/tmp/nvidia-container-toolkit.gpg"
+    sudo apt-key add /tmp/nvidia-container-toolkit.gpg
+    
+    # Update package lists
+    retry_with_backoff 3 5 sudo apt-get update
+    
+    # Install NVIDIA Container Toolkit
+    install_packages nvidia-container-toolkit
+    
+    # Configure NVIDIA Container Toolkit
+    sudo nvidia-ctk runtime configure --runtime=docker
+    
+    log_success "NVIDIA Container Toolkit installed"
+    return 0
+}
+
+# Start and enable Docker service
+start_docker_service() {
+    log_info "Starting Docker service..."
+    
+    # Reload systemd daemon
+    sudo systemctl daemon-reload
+    
+    # Start and enable Docker
+    enable_and_start_service docker
+    
+    # Enable Docker socket
+    sudo systemctl enable docker.socket
+    
+    # Wait for Docker to be ready
+    sleep 5
+    
+    # Test Docker daemon
+    if sudo docker version >/dev/null 2>&1; then
+        log_success "Docker daemon is running"
+    else
+        log_error "Docker daemon is not responding"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Configure Docker Compose
+configure_docker_compose() {
+    log_info "Configuring Docker Compose..."
+    
+    # Check if Docker Compose is installed
+    if ! command -v docker-compose >/dev/null 2>&1; then
+        log_warn "Docker Compose not found, installing..."
+        install_packages docker-compose
+    fi
+    
+    # Test Docker Compose
+    if docker-compose --version >/dev/null 2>&1; then
+        log_success "Docker Compose is working"
+        docker-compose --version | log_info
+    else
+        log_error "Docker Compose is not working"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Test Docker installation
+test_docker_installation() {
+    log_info "Testing Docker installation..."
+    
+    # Test basic Docker functionality
+    if sudo docker run --rm hello-world >/dev/null 2>&1; then
+        log_success "Docker basic functionality test passed"
+    else
+        log_error "Docker basic functionality test failed"
+        return 1
+    fi
+    
+    # Test Docker without sudo (user permissions)
+    if docker run --rm hello-world >/dev/null 2>&1; then
+        log_success "Docker user permissions test passed"
+    else
+        log_warn "Docker user permissions test failed (may need logout/login)"
+        
+        # Try to fix permissions
+        sudo chown "$USER:docker" /var/run/docker.sock
+        sudo chmod 666 /var/run/docker.sock
+        
+        # Test again
+        if docker run --rm hello-world >/dev/null 2>&1; then
+            log_success "Docker user permissions fixed"
+        else
+            log_warn "Docker user permissions still not working (logout/login may be required)"
+        fi
+    fi
+    
+    return 0
+}
+
+# Test Docker GPU support
+test_docker_gpu() {
+    log_info "Testing Docker GPU support..."
+    
+    # Check if NVIDIA drivers are present
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        log_info "NVIDIA drivers not found, skipping GPU test"
+        return 0
+    fi
+    
+    # Test GPU support
+    if docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+        log_success "Docker GPU support test passed"
+    else
+        log_warn "Docker GPU support test failed"
+        
+        # Try alternative runtime
+        if docker run --rm --runtime=nvidia nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+            log_success "Docker GPU support working with nvidia runtime"
+        else
+            log_error "Docker GPU support not working"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Configure Docker system service
+configure_docker_system_service() {
+    log_info "Configuring Docker system service..."
+    
+    # Create Docker service override
+    local docker_override="/etc/systemd/system/docker.service.d/override.conf"
+    sudo mkdir -p "$(dirname "$docker_override")"
+    
+    sudo tee "$docker_override" > /dev/null << 'EOF'
+[Service]
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+ExecStart=
+ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock
+EOF
+    
+    # Reload systemd
+    sudo systemctl daemon-reload
+    
+    log_success "Docker system service configured"
+    return 0
+}
+
+# Clean up Docker installation
+cleanup_docker() {
+    log_info "Cleaning up Docker installation..."
+    
+    # Remove downloaded images we used for testing
+    docker rmi hello-world 2>/dev/null || true
+    docker rmi nvidia/cuda:12.6.0-base-ubuntu22.04 2>/dev/null || true
+    
+    # Clean up build cache
+    docker builder prune -f 2>/dev/null || true
+    
+    # Remove temporary files
+    rm -f /tmp/docker.gpg
+    rm -f /tmp/nvidia-container-toolkit.gpg
+    
+    log_success "Docker installation cleanup completed"
+    return 0
+}
+
+# Main Docker setup function
+main() {
+    log "Starting Docker setup..."
+    
+    # Remove existing Docker installations
+    remove_existing_docker
+    
+    # Add Docker repository
+    add_docker_repository
+    
+    # Install Docker Engine
+    install_docker_engine
+    
+    # Configure Docker daemon
+    configure_docker_daemon
+    
+    # Configure Docker permissions
+    configure_docker_permissions
+    
+    # Install NVIDIA Container Toolkit
+    install_nvidia_container_toolkit
+    
+    # Configure Docker system service
+    configure_docker_system_service
+    
+    # Start Docker service
+    start_docker_service
+    
+    # Configure Docker Compose
+    configure_docker_compose
+    
+    # Test Docker installation
+    test_docker_installation
+    
+    # Test Docker GPU support
+    test_docker_gpu
+    
+    # Clean up
+    cleanup_docker
+    
+    log_success "Docker setup completed successfully"
+    
+    # Show summary
+    echo
+    echo "Docker Setup Summary:"
+    echo "===================="
+    echo "✓ Docker Engine installed"
+    echo "✓ Docker daemon configured"
+    echo "✓ User permissions configured"
+    echo "✓ Docker Compose installed"
+    
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "✓ NVIDIA Container Toolkit installed"
+        echo "✓ GPU support configured"
+    else
+        echo "- GPU support skipped (no NVIDIA drivers)"
+    fi
+    
+    echo "✓ Docker service started and enabled"
+    echo "✓ Installation tests passed"
+    echo
+    
+    return 0
+}
+
+# Run main function
+main "$@"

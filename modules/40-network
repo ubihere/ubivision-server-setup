@@ -1,0 +1,475 @@
+#!/bin/bash
+# Module 40: Network Setup
+# ========================
+
+set -euo pipefail
+
+# Module information
+MODULE_NAME="40-network"
+MODULE_DESCRIPTION="Network configuration and services"
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source libraries
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/state.sh"
+
+# Load configuration
+load_config "$SCRIPT_DIR/config/defaults.env"
+
+log_info "Starting module: $MODULE_DESCRIPTION"
+
+# Install Tailscale
+install_tailscale() {
+    log_info "Installing Tailscale..."
+    
+    # Check if Tailscale is already installed
+    if command -v tailscale >/dev/null 2>&1; then
+        log_info "Tailscale is already installed"
+        tailscale version | log_info
+        return 0
+    fi
+    
+    # Download and run Tailscale installer
+    local tailscale_script="/tmp/tailscale-install.sh"
+    download_with_retry "https://tailscale.com/install.sh" "$tailscale_script"
+    
+    # Make executable and run
+    chmod +x "$tailscale_script"
+    if bash "$tailscale_script"; then
+        log_success "Tailscale installed successfully"
+    else
+        log_error "Tailscale installation failed"
+        return 1
+    fi
+    
+    # Clean up
+    rm -f "$tailscale_script"
+    
+    return 0
+}
+
+# Configure Tailscale auto-connect
+configure_tailscale_autoconnect() {
+    log_info "Configuring Tailscale auto-connect..."
+    
+    if [ "$TAILSCALE_AUTO_CONNECT" != "true" ]; then
+        log_info "Tailscale auto-connect disabled by configuration"
+        return 0
+    fi
+    
+    # Build Tailscale up command
+    local tailscale_cmd="tailscale up"
+    
+    if [ "$TAILSCALE_ACCEPT_ROUTES" = "true" ]; then
+        tailscale_cmd="$tailscale_cmd --accept-routes"
+    fi
+    
+    if [ "$TAILSCALE_ACCEPT_DNS" = "false" ]; then
+        tailscale_cmd="$tailscale_cmd --accept-dns=false"
+    fi
+    
+    # Create auto-connect service
+    local service_content="[Unit]
+Description=Tailscale Auto-connect Service
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/$tailscale_cmd
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target"
+    
+    create_systemd_service "tailscale-autoconnect" "$service_content"
+    
+    # Enable the service
+    sudo systemctl enable tailscale-autoconnect
+    
+    log_success "Tailscale auto-connect configured"
+    return 0
+}
+
+# Configure SSH hardening
+configure_ssh_hardening() {
+    log_info "Configuring SSH hardening..."
+    
+    # Create SSH hardening configuration
+    local ssh_hardening="/etc/ssh/sshd_config.d/98-hardening.conf"
+    backup_file "$ssh_hardening"
+    
+    sudo tee "$ssh_hardening" > /dev/null << 'EOF'
+# SSH Security Hardening
+Protocol 2
+PermitRootLogin no
+PasswordAuthentication yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+Compression delayed
+MaxAuthTries 3
+MaxSessions 10
+ClientAliveCountMax 3
+LoginGraceTime 60
+AllowUsers *
+DenyUsers root
+EOF
+    
+    # Restart SSH service
+    sudo systemctl restart ssh
+    
+    log_success "SSH hardening configured"
+    return 0
+}
+
+# Configure Wake-on-LAN
+configure_wake_on_lan() {
+    log_info "Configuring Wake-on-LAN..."
+    
+    if [ "$ENABLE_WAKE_ON_LAN" != "true" ]; then
+        log_info "Wake-on-LAN disabled by configuration"
+        return 0
+    fi
+    
+    # Install ethtool and wakeonlan
+    install_packages ethtool wakeonlan
+    
+    # Get primary network interface
+    local primary_interface=$(ip route | grep default | awk '{print $5}' | head -n1)
+    
+    if [ -z "$primary_interface" ]; then
+        log_error "Could not determine primary network interface"
+        return 1
+    fi
+    
+    log_info "Primary network interface: $primary_interface"
+    
+    # Check if interface supports Wake-on-LAN
+    if ! ethtool "$primary_interface" | grep -q "Supports Wake-on"; then
+        log_warn "Network interface $primary_interface does not support Wake-on-LAN"
+        return 0
+    fi
+    
+    # Enable Wake-on-LAN for current session
+    sudo ethtool -s "$primary_interface" wol g
+    
+    # Create systemd service to enable WoL on boot
+    local wol_service_content="[Unit]
+Description=Enable Wake-on-LAN
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ethtool -s $primary_interface wol g
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target"
+    
+    create_systemd_service "wake-on-lan" "$wol_service_content"
+    
+    # Enable and start the service
+    sudo systemctl enable wake-on-lan
+    sudo systemctl start wake-on-lan
+    
+    # Get MAC address for documentation
+    local mac_address=$(ip link show "$primary_interface" | grep -oP '(?<=link/ether\s)[a-fA-F0-9:]+' | head -n1)
+    
+    log_success "Wake-on-LAN configured for $primary_interface (MAC: $mac_address)"
+    return 0
+}
+
+# Configure watchdog
+configure_watchdog() {
+    log_info "Configuring system watchdog..."
+    
+    if [ "$ENABLE_WATCHDOG" != "true" ]; then
+        log_info "Watchdog disabled by configuration"
+        return 0
+    fi
+    
+    # Install watchdog
+    install_packages watchdog
+    
+    # Get primary network interface
+    local primary_interface=$(ip route | grep default | awk '{print $5}' | head -n1)
+    
+    # Create watchdog configuration
+    local watchdog_config="/etc/watchdog.conf"
+    backup_file "$watchdog_config"
+    
+    sudo tee "$watchdog_config" > /dev/null << EOF
+# Deployment Tower Watchdog Configuration
+watchdog-device = /dev/watchdog
+watchdog-timeout = 60
+interval = 10
+realtime = yes
+priority = 1
+
+# System load monitoring
+max-load-1 = 24
+max-load-5 = 18
+max-load-15 = 12
+
+# Memory monitoring
+min-memory = 1
+allocatable-memory = 1
+
+# Network monitoring
+interface = $primary_interface
+ping = 8.8.8.8
+ping-count = 3
+
+# Process monitoring
+pidfile = /var/run/docker.pid
+pidfile = /var/run/tailscaled.pid
+
+# File system monitoring
+file = /var/log/syslog
+change = 1407
+EOF
+    
+    # Enable hardware watchdog in kernel
+    if ! lsmod | grep -q softdog; then
+        echo "softdog" | sudo tee -a /etc/modules
+        sudo modprobe softdog
+    fi
+    
+    # Enable and start watchdog service
+    enable_and_start_service watchdog
+    
+    log_success "System watchdog configured and enabled"
+    return 0
+}
+
+# Setup GitHub SSH access
+setup_github_ssh() {
+    log_info "Setting up GitHub SSH access..."
+    
+    local ssh_dir="$HOME/.ssh"
+    local ssh_key="$ssh_dir/id_ed25519"
+    local ssh_pub_key="$ssh_key.pub"
+    
+    # Create SSH directory if it doesn't exist
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    
+    # Generate SSH key if it doesn't exist
+    if [ ! -f "$ssh_key" ]; then
+        log_info "Generating SSH key..."
+        ssh-keygen -t ed25519 -C "$(hostname)-$GITHUB_SSH_KEY_TITLE" -f "$ssh_key" -N ""
+        log_success "SSH key generated"
+    else
+        log_info "SSH key already exists"
+    fi
+    
+    # Get the public key
+    local ssh_public_key=$(cat "$ssh_pub_key")
+    
+    # Test GitHub SSH connection
+    if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+        log_success "GitHub SSH connection already configured and working!"
+        return 0
+    fi
+    
+    # Prompt for GitHub token
+    echo
+    echo "To automatically add this server's SSH key to your GitHub account,"
+    echo "please enter your GitHub Personal Access Token (with 'admin:public_key' scope):"
+    echo "(Leave blank to skip and manually add the key later)"
+    echo
+    read -s -p "GitHub Token: " GITHUB_TOKEN
+    echo
+    
+    if [ -z "$GITHUB_TOKEN" ]; then
+        log_info "GitHub token not provided, skipping automatic key setup"
+        echo
+        echo "Manual setup required:"
+        echo "====================="
+        echo "1. Copy the following SSH key:"
+        echo "$ssh_public_key"
+        echo
+        echo "2. Add it to your GitHub account at:"
+        echo "   https://github.com/settings/keys"
+        echo
+        return 0
+    fi
+    
+    # Check if key already exists on GitHub
+    log_info "Checking if SSH key already exists on GitHub..."
+    local key_exists=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+        "$GITHUB_API_URL/user/keys" | grep -c "$ssh_public_key" || true)
+    
+    if [ "$key_exists" -gt 0 ]; then
+        log_success "SSH key already exists on GitHub account!"
+    else
+        # Add SSH key to GitHub account
+        log_info "Adding SSH key to GitHub..."
+        local response=$(curl -s -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"title\":\"$(hostname)-$GITHUB_SSH_KEY_TITLE\",\"key\":\"$ssh_public_key\"}" \
+            "$GITHUB_API_URL/user/keys")
+        
+        if echo "$response" | grep -q "\"id\""; then
+            log_success "SSH key successfully added to GitHub!"
+        else
+            log_error "Failed to add SSH key to GitHub"
+            echo "Response: $response"
+            return 1
+        fi
+    fi
+    
+    # Configure git
+    git config --global user.name "$(hostname)-$GITHUB_SSH_KEY_TITLE"
+    git config --global user.email "$(whoami)@$(hostname)"
+    
+    # Test the connection
+    if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+        log_success "GitHub SSH connection verified!"
+    else
+        log_warn "GitHub SSH connection test failed"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Configure firewall
+configure_firewall() {
+    log_info "Configuring firewall..."
+    
+    # Install ufw if not present
+    install_packages ufw
+    
+    # Reset firewall to defaults
+    sudo ufw --force reset
+    
+    # Set default policies
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    
+    # Allow SSH
+    sudo ufw allow "$SSH_PORT"/tcp comment "SSH"
+    
+    # Allow Docker swarm ports if Docker is installed
+    if command -v docker >/dev/null 2>&1; then
+        sudo ufw allow 2377/tcp comment "Docker swarm cluster management"
+        sudo ufw allow 7946/tcp comment "Docker swarm node communication"
+        sudo ufw allow 7946/udp comment "Docker swarm node communication"
+        sudo ufw allow 4789/udp comment "Docker swarm overlay network"
+    fi
+    
+    # Allow common services
+    sudo ufw allow 80/tcp comment "HTTP"
+    sudo ufw allow 443/tcp comment "HTTPS"
+    
+    # Enable firewall
+    sudo ufw --force enable
+    
+    log_success "Firewall configured and enabled"
+    return 0
+}
+
+# Configure network performance
+configure_network_performance() {
+    log_info "Configuring network performance..."
+    
+    # Network performance sysctl settings
+    local net_sysctl="/etc/sysctl.d/98-network-performance.conf"
+    
+    sudo tee "$net_sysctl" > /dev/null << 'EOF'
+# Network Performance Optimization
+net.core.rmem_default = 262144
+net.core.rmem_max = 16777216
+net.core.wmem_default = 262144
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_no_metrics_save = 1
+net.core.netdev_max_backlog = 5000
+net.ipv4.tcp_congestion_control = bbr
+EOF
+    
+    # Apply settings
+    sudo sysctl -p "$net_sysctl"
+    
+    log_success "Network performance configured"
+    return 0
+}
+
+# Main network setup function
+main() {
+    log "Starting network setup..."
+    
+    # Install Tailscale
+    install_tailscale
+    
+    # Configure Tailscale auto-connect
+    configure_tailscale_autoconnect
+    
+    # Configure SSH hardening
+    configure_ssh_hardening
+    
+    # Configure Wake-on-LAN
+    configure_wake_on_lan
+    
+    # Configure watchdog
+    configure_watchdog
+    
+    # Setup GitHub SSH access
+    setup_github_ssh
+    
+    # Configure firewall
+    configure_firewall
+    
+    # Configure network performance
+    configure_network_performance
+    
+    log_success "Network setup completed successfully"
+    
+    # Show summary
+    echo
+    echo "Network Setup Summary:"
+    echo "====================="
+    echo "✓ Tailscale installed and configured"
+    echo "✓ SSH hardening configured"
+    
+    if [ "$ENABLE_WAKE_ON_LAN" = "true" ]; then
+        echo "✓ Wake-on-LAN configured"
+    fi
+    
+    if [ "$ENABLE_WATCHDOG" = "true" ]; then
+        echo "✓ System watchdog configured"
+    fi
+    
+    echo "✓ GitHub SSH access configured"
+    echo "✓ Firewall configured"
+    echo "✓ Network performance optimized"
+    echo
+    echo "Next steps:"
+    echo "- Connect to Tailscale: sudo tailscale up"
+    echo "- Test SSH access to GitHub: ssh -T git@github.com"
+    echo "- Check firewall status: sudo ufw status"
+    echo
+    
+    return 0
+}
+
+# Run main function
+main "$@"

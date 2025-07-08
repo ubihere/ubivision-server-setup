@@ -1,0 +1,405 @@
+#!/bin/bash
+# Module 10: System Setup
+# =======================
+
+set -euo pipefail
+
+# Module information
+MODULE_NAME="10-system"
+MODULE_DESCRIPTION="Core system setup and configuration"
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source libraries
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/state.sh"
+
+# Load configuration
+load_config "$SCRIPT_DIR/config/defaults.env"
+
+log_info "Starting module: $MODULE_DESCRIPTION"
+
+# Configure hostname
+configure_hostname() {
+    log_info "Configuring hostname..."
+    
+    local current_hostname=$(hostname)
+    local new_hostname="${HOSTNAME_PREFIX}-$(date +%s)"
+    
+    if [[ "$current_hostname" == "$HOSTNAME_PREFIX"* ]]; then
+        log_success "Hostname already configured: $current_hostname"
+        return 0
+    fi
+    
+    # Set hostname
+    sudo hostnamectl set-hostname "$new_hostname"
+    
+    # Update /etc/hosts
+    backup_file "/etc/hosts"
+    sudo sed -i "s/127.0.1.1.*/127.0.1.1\t$new_hostname/" /etc/hosts
+    
+    log_success "Hostname set to: $new_hostname"
+    return 0
+}
+
+# Expand storage
+expand_storage() {
+    log_info "Expanding storage to use full disk space..."
+    
+    # Check current filesystem size
+    local current_fs_size=$(df -BG / | awk 'NR==2 {print int($2)}')
+    
+    # Check logical volume size if LVM is present
+    if [ -e /dev/ubuntu-vg/ubuntu-lv ]; then
+        local lv_size=$(sudo lvs --noheadings --units g /dev/ubuntu-vg/ubuntu-lv 2>/dev/null | awk '{print int($4)}' || echo "0")
+        
+        log_info "Current filesystem size: ${current_fs_size}GB"
+        log_info "Logical volume size: ${lv_size}GB"
+        
+        if [ "$current_fs_size" -ge "$lv_size" ] || [ "$current_fs_size" -gt 200 ]; then
+            log_success "Storage already fully expanded"
+            return 0
+        fi
+        
+        # Try to extend LV (may already be at max)
+        log_info "Attempting to extend logical volume..."
+        if sudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv 2>/dev/null; then
+            log_success "Logical volume extended successfully"
+        else
+            log_info "Logical volume already at maximum size"
+        fi
+        
+        # Check and resize filesystem
+        log_info "Checking and resizing filesystem..."
+        if sudo e2fsck -f -y /dev/ubuntu-vg/ubuntu-lv 2>/dev/null; then
+            log_success "Filesystem check completed"
+        else
+            log_warn "Filesystem check encountered issues (may be normal)"
+        fi
+        
+        if sudo resize2fs /dev/ubuntu-vg/ubuntu-lv 2>/dev/null; then
+            log_success "Filesystem resized successfully"
+        else
+            log_warn "Filesystem resize failed or not needed"
+        fi
+    else
+        log_info "No LVM detected, checking for other expansion methods..."
+        
+        # Try resize2fs on the root filesystem
+        local root_device=$(df / | awk 'NR==2 {print $1}')
+        if sudo resize2fs "$root_device" 2>/dev/null; then
+            log_success "Root filesystem expanded"
+        else
+            log_info "Root filesystem expansion not needed or failed"
+        fi
+    fi
+    
+    # Show final disk usage
+    log_info "Final disk usage:"
+    df -h / | log_info
+    
+    return 0
+}
+
+# Configure swap
+configure_swap() {
+    log_info "Configuring swap file..."
+    
+    # Check if swap is already configured
+    if [ -f /swapfile ]; then
+        local swap_size=$(ls -lh /swapfile | awk '{print $5}')
+        log_success "Swap file already exists: $swap_size"
+        
+        # Ensure it's enabled
+        if swapon --show | grep -q "/swapfile"; then
+            log_success "Swap file is active"
+        else
+            log_info "Activating swap file..."
+            sudo swapon /swapfile
+        fi
+        
+        # Ensure it's in fstab
+        if grep -q "/swapfile" /etc/fstab; then
+            log_success "Swap file is in fstab"
+        else
+            log_info "Adding swap file to fstab..."
+            echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+        fi
+        
+        return 0
+    fi
+    
+    # Create swap file
+    log_info "Creating ${SWAP_SIZE} swap file..."
+    
+    # Calculate size in MB
+    local swap_size_mb
+    case "$SWAP_SIZE" in
+        *G) swap_size_mb=$((${SWAP_SIZE%G} * 1024)) ;;
+        *M) swap_size_mb=${SWAP_SIZE%M} ;;
+        *) swap_size_mb=2048 ;;  # Default 2GB
+    esac
+    
+    # Create swap file
+    sudo fallocate -l "${swap_size_mb}M" /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    
+    # Add to fstab
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+    
+    log_success "Swap file created and activated: $SWAP_SIZE"
+    return 0
+}
+
+# Install and configure time synchronization
+configure_time_sync() {
+    log_info "Configuring time synchronization..."
+    
+    # Install chrony
+    install_packages chrony
+    
+    # Configure chrony
+    backup_file "/etc/chrony/chrony.conf"
+    
+    # Add additional time servers if not already present
+    local chrony_conf="/etc/chrony/chrony.conf"
+    if ! grep -q "pool time.google.com" "$chrony_conf"; then
+        log_info "Adding additional time servers..."
+        echo "pool time.google.com iburst" | sudo tee -a "$chrony_conf"
+        echo "pool time.cloudflare.com iburst" | sudo tee -a "$chrony_conf"
+    fi
+    
+    # Start and enable chrony
+    enable_and_start_service chrony
+    
+    # Wait for synchronization
+    log_info "Waiting for time synchronization..."
+    sleep 5
+    
+    # Check sync status
+    if sudo chronyc tracking | grep -q "Leap status.*Normal"; then
+        log_success "Time synchronization is working"
+    else
+        log_warn "Time synchronization may not be working properly"
+    fi
+    
+    return 0
+}
+
+# Disable automatic updates
+disable_automatic_updates() {
+    if [ "$DISABLE_AUTOMATIC_UPDATES" != "true" ]; then
+        log_info "Automatic updates are enabled by configuration"
+        return 0
+    fi
+    
+    log_info "Disabling automatic updates for stability..."
+    
+    # Stop and disable unattended-upgrades
+    if systemctl is-active --quiet unattended-upgrades; then
+        sudo systemctl stop unattended-upgrades
+        log_info "Stopped unattended-upgrades service"
+    fi
+    
+    if systemctl is-enabled --quiet unattended-upgrades; then
+        sudo systemctl disable unattended-upgrades
+        log_info "Disabled unattended-upgrades service"
+    fi
+    
+    # Remove package if present
+    if dpkg -l | grep -q unattended-upgrades; then
+        sudo apt-get remove -y unattended-upgrades 2>/dev/null || true
+        log_info "Removed unattended-upgrades package"
+    fi
+    
+    # Disable automatic package updates
+    if [ -f /etc/apt/apt.conf.d/20auto-upgrades ]; then
+        backup_file "/etc/apt/apt.conf.d/20auto-upgrades"
+        sudo tee /etc/apt/apt.conf.d/20auto-upgrades > /dev/null << 'EOF'
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+        log_info "Disabled automatic package updates"
+    fi
+    
+    log_success "Automatic updates disabled"
+    return 0
+}
+
+# Configure kernel panic settings
+configure_kernel_panic() {
+    log_info "Configuring kernel panic and recovery settings..."
+    
+    local sysctl_file="/etc/sysctl.d/99-deployment-tower.conf"
+    
+    # Create sysctl configuration
+    sudo tee "$sysctl_file" > /dev/null << 'EOF'
+# Deployment Tower Kernel Settings
+# Reboot after kernel panic
+kernel.panic = 10
+kernel.panic_on_oops = 1
+kernel.unknown_nmi_panic = 1
+kernel.softlockup_panic = 1
+
+# Network optimizations
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+
+# File system optimizations
+fs.file-max = 65536
+vm.swappiness = 10
+EOF
+    
+    # Apply settings
+    sudo sysctl -p "$sysctl_file"
+    
+    log_success "Kernel panic and system settings configured"
+    return 0
+}
+
+# Install essential system packages
+install_essential_packages() {
+    log_info "Installing essential system packages..."
+    
+    local essential_packages=(
+        "htop"
+        "nano"
+        "vim"
+        "git"
+        "build-essential"
+        "python3-pip"
+        "python3-venv"
+        "magic-wormhole"
+        "openssh-server"
+        "net-tools"
+        "dnsutils"
+        "iputils-ping"
+        "traceroute"
+        "tcpdump"
+        "iftop"
+        "iotop"
+        "tree"
+        "zip"
+        "unzip"
+        "screen"
+        "tmux"
+        "rsync"
+        "ethtool"
+        "wakeonlan"
+        "lm-sensors"
+        "smartmontools"
+        "parted"
+        "fdisk"
+        "gdisk"
+    )
+    
+    install_packages "${essential_packages[@]}"
+    
+    log_success "Essential packages installed"
+    return 0
+}
+
+# Configure SSH server
+configure_ssh() {
+    log_info "Configuring SSH server..."
+    
+    # Ensure SSH is installed
+    install_packages openssh-server
+    
+    # Create SSH configuration
+    local ssh_config="/etc/ssh/sshd_config.d/99-deployment-tower.conf"
+    
+    sudo tee "$ssh_config" > /dev/null << EOF
+# Deployment Tower SSH Configuration
+Port ${SSH_PORT}
+TCPKeepAlive yes
+ClientAliveInterval ${SSH_KEEPALIVE}
+ClientAliveCountMax 3
+MaxAuthTries 3
+MaxSessions 10
+X11Forwarding no
+EOF
+    
+    # Configure SSH service restart on failure
+    local ssh_override="/etc/systemd/system/ssh.service.d/override.conf"
+    sudo mkdir -p "$(dirname "$ssh_override")"
+    
+    sudo tee "$ssh_override" > /dev/null << 'EOF'
+[Service]
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+EOF
+    
+    # Reload systemd and restart SSH
+    sudo systemctl daemon-reload
+    enable_and_start_service ssh
+    
+    log_success "SSH server configured and running"
+    return 0
+}
+
+# Configure system limits
+configure_system_limits() {
+    log_info "Configuring system limits..."
+    
+    local limits_file="/etc/security/limits.d/99-deployment-tower.conf"
+    
+    sudo tee "$limits_file" > /dev/null << 'EOF'
+# Deployment Tower System Limits
+* soft nofile 65536
+* hard nofile 65536
+* soft nproc 65536
+* hard nproc 65536
+root soft nofile 65536
+root hard nofile 65536
+root soft nproc 65536
+root hard nproc 65536
+EOF
+    
+    log_success "System limits configured"
+    return 0
+}
+
+# Main system setup function
+main() {
+    log "Starting system setup..."
+    
+    # Run all system setup steps
+    configure_hostname
+    expand_storage
+    configure_swap
+    configure_time_sync
+    disable_automatic_updates
+    configure_kernel_panic
+    install_essential_packages
+    configure_ssh
+    configure_system_limits
+    
+    log_success "System setup completed successfully"
+    
+    # Show summary
+    echo
+    echo "System Setup Summary:"
+    echo "===================="
+    echo "✓ Hostname configured"
+    echo "✓ Storage expanded"
+    echo "✓ Swap file created"
+    echo "✓ Time synchronization configured"
+    echo "✓ Automatic updates disabled"
+    echo "✓ Kernel panic settings configured"
+    echo "✓ Essential packages installed"
+    echo "✓ SSH server configured"
+    echo "✓ System limits configured"
+    echo
+    
+    return 0
+}
+
+# Run main function
+main "$@"

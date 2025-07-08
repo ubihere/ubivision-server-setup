@@ -1,0 +1,317 @@
+#!/bin/bash
+# Module 00: System Verification
+# ==============================
+
+set -euo pipefail
+
+# Module information
+MODULE_NAME="00-verify"
+MODULE_DESCRIPTION="System verification and requirements check"
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source libraries
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/state.sh"
+
+# Load configuration
+load_config "$SCRIPT_DIR/config/defaults.env"
+
+log_info "Starting module: $MODULE_DESCRIPTION"
+
+# Check system requirements
+check_system_requirements() {
+    log_info "Checking system requirements..."
+    
+    # Check Ubuntu version
+    if ! lsb_release -a 2>/dev/null | grep -q "Ubuntu 22.04"; then
+        log_warn "This system is not Ubuntu 22.04:"
+        lsb_release -a 2>/dev/null | grep "Description:" || echo "Unknown distribution"
+        
+        if ! confirm_continue "Continue with non-Ubuntu 22.04 system?"; then
+            return 1
+        fi
+    else
+        log_success "Ubuntu 22.04 detected"
+    fi
+    
+    # Check architecture
+    local arch=$(dpkg --print-architecture)
+    if [ "$arch" != "amd64" ]; then
+        log_error "Unsupported architecture: $arch (requires amd64)"
+        return 1
+    fi
+    log_success "Architecture: $arch"
+    
+    # Check memory (minimum 4GB)
+    local mem_gb=$(free -g | awk 'NR==2{print $2}')
+    if [ "$mem_gb" -lt 4 ]; then
+        log_error "Insufficient memory: ${mem_gb}GB (minimum 4GB required)"
+        return 1
+    fi
+    log_success "Memory: ${mem_gb}GB"
+    
+    # Check disk space (minimum 50GB)
+    local disk_gb=$(df -BG / | awk 'NR==2 {print int($4)}')
+    if [ "$disk_gb" -lt 50 ]; then
+        log_error "Insufficient disk space: ${disk_gb}GB available (minimum 50GB required)"
+        return 1
+    fi
+    log_success "Disk space: ${disk_gb}GB available"
+    
+    # Check internet connectivity
+    if ! check_internet; then
+        log_error "No internet connectivity"
+        return 1
+    fi
+    log_success "Internet connectivity verified"
+    
+    return 0
+}
+
+# Check hardware requirements
+check_hardware() {
+    log_info "Checking hardware requirements..."
+    
+    # Check for GPU
+    if lspci | grep -qi nvidia; then
+        log_success "NVIDIA GPU detected"
+        lspci | grep -i nvidia | head -1 | log_info
+        
+        # Check for Secure Boot
+        local secure_boot=$(check_secure_boot)
+        if [ "$secure_boot" = "enabled" ]; then
+            log_warn "Secure Boot is enabled - this may prevent NVIDIA drivers from working"
+            log_warn "Please disable Secure Boot in BIOS settings for optimal compatibility"
+            
+            if [ "$SECURE_BOOT_WARNING" = "true" ]; then
+                if ! confirm_continue "Continue with Secure Boot enabled?"; then
+                    return 1
+                fi
+            fi
+        else
+            log_success "Secure Boot is disabled"
+        fi
+    else
+        log_warn "No NVIDIA GPU detected"
+        if ! confirm_continue "Continue without NVIDIA GPU?"; then
+            return 1
+        fi
+    fi
+    
+    # Check CPU cores
+    local cpu_cores=$(nproc)
+    if [ "$cpu_cores" -lt 2 ]; then
+        log_warn "Limited CPU cores: $cpu_cores (recommended: 4+)"
+    else
+        log_success "CPU cores: $cpu_cores"
+    fi
+    
+    return 0
+}
+
+# Check permissions and access
+check_permissions() {
+    log_info "Checking permissions and access..."
+    
+    # Check sudo access
+    if ! sudo -n true 2>/dev/null; then
+        log_error "No sudo access available"
+        return 1
+    fi
+    log_success "Sudo access verified"
+    
+    # Check if user is in sudo group
+    if groups | grep -q sudo; then
+        log_success "User is in sudo group"
+    else
+        log_warn "User is not in sudo group"
+    fi
+    
+    # Check for existing lock files
+    if [ -f /var/lib/dpkg/lock ]; then
+        log_warn "Package manager may be locked"
+    fi
+    
+    return 0
+}
+
+# Check existing services that might conflict
+check_existing_services() {
+    log_info "Checking for conflicting services..."
+    
+    # Check for existing Docker installation
+    if command -v docker >/dev/null 2>&1; then
+        log_warn "Docker is already installed"
+        docker --version | log_info
+        
+        # Check Docker daemon status
+        if systemctl is-active --quiet docker; then
+            log_info "Docker daemon is running"
+        else
+            log_info "Docker daemon is not running"
+        fi
+    else
+        log_success "No existing Docker installation found"
+    fi
+    
+    # Check for existing NVIDIA drivers
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        log_warn "NVIDIA drivers are already installed"
+        nvidia-smi --version | head -1 | log_info
+        
+        # Test if they work
+        if nvidia-smi >/dev/null 2>&1; then
+            log_info "NVIDIA drivers are working"
+        else
+            log_warn "NVIDIA drivers are installed but not working"
+        fi
+    else
+        log_success "No existing NVIDIA drivers found"
+    fi
+    
+    # Check for Tailscale
+    if command -v tailscale >/dev/null 2>&1; then
+        log_warn "Tailscale is already installed"
+        tailscale version | log_info
+        
+        # Check connection status
+        if tailscale status >/dev/null 2>&1; then
+            log_info "Tailscale is connected"
+        else
+            log_info "Tailscale is not connected"
+        fi
+    else
+        log_success "No existing Tailscale installation found"
+    fi
+    
+    return 0
+}
+
+# Check network configuration
+check_network_config() {
+    log_info "Checking network configuration..."
+    
+    # Get primary network interface
+    local primary_interface=$(ip route | grep default | awk '{print $5}' | head -n1)
+    if [ -z "$primary_interface" ]; then
+        log_error "No default network interface found"
+        return 1
+    fi
+    log_success "Primary interface: $primary_interface"
+    
+    # Check IP address
+    local ip_address=$(ip -4 addr show "$primary_interface" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)
+    if [ -z "$ip_address" ]; then
+        log_error "No IP address found for interface $primary_interface"
+        return 1
+    fi
+    log_success "IP address: $ip_address"
+    
+    # Check MAC address
+    local mac_address=$(ip link show "$primary_interface" | grep -oP '(?<=link/ether\s)[a-fA-F0-9:]+' | head -n1)
+    if [ -z "$mac_address" ]; then
+        log_error "No MAC address found for interface $primary_interface"
+        return 1
+    fi
+    log_success "MAC address: $mac_address"
+    
+    # Check DNS resolution
+    if ! nslookup google.com >/dev/null 2>&1; then
+        log_error "DNS resolution is not working"
+        return 1
+    fi
+    log_success "DNS resolution is working"
+    
+    return 0
+}
+
+# Confirmation helper
+confirm_continue() {
+    local message=$1
+    
+    echo
+    read -p "$message (y/N): " -n 1 -r
+    echo
+    
+    [[ $REPLY =~ ^[Yy]$ ]]
+}
+
+# Pre-installation updates
+prepare_system() {
+    log_info "Preparing system for installation..."
+    
+    # Update package lists
+    log_info "Updating package lists..."
+    retry_with_backoff 3 5 sudo apt-get update -y
+    
+    # Install essential packages
+    log_info "Installing essential packages..."
+    install_packages curl wget gnupg lsb-release ca-certificates software-properties-common jq
+    
+    # Set timezone if not already set
+    local current_tz=$(timedatectl | grep "Time zone" | awk '{print $3}')
+    if [ "$current_tz" != "$TIMEZONE" ]; then
+        log_info "Setting timezone to $TIMEZONE"
+        sudo timedatectl set-timezone "$TIMEZONE"
+    else
+        log_success "Timezone already set to $TIMEZONE"
+    fi
+    
+    return 0
+}
+
+# Main verification function
+main() {
+    log "Starting system verification..."
+    
+    # Run all checks
+    if ! check_system_requirements; then
+        log_error "System requirements check failed"
+        exit 1
+    fi
+    
+    if ! check_hardware; then
+        log_error "Hardware requirements check failed"
+        exit 1
+    fi
+    
+    if ! check_permissions; then
+        log_error "Permissions check failed"
+        exit 1
+    fi
+    
+    if ! check_existing_services; then
+        log_error "Existing services check failed"
+        exit 1
+    fi
+    
+    if ! check_network_config; then
+        log_error "Network configuration check failed"
+        exit 1
+    fi
+    
+    if ! prepare_system; then
+        log_error "System preparation failed"
+        exit 1
+    fi
+    
+    log_success "System verification completed successfully"
+    
+    # Show summary
+    echo
+    echo "System Verification Summary:"
+    echo "=========================="
+    echo "✓ Ubuntu 22.04 system verified"
+    echo "✓ Hardware requirements met"
+    echo "✓ Permissions and access verified"
+    echo "✓ Network configuration valid"
+    echo "✓ System prepared for installation"
+    echo
+    
+    return 0
+}
+
+# Run main function
+main "$@"

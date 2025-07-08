@@ -1,0 +1,428 @@
+#!/bin/bash
+# Module 20: NVIDIA Setup
+# =======================
+
+set -euo pipefail
+
+# Module information
+MODULE_NAME="20-nvidia"
+MODULE_DESCRIPTION="NVIDIA GPU drivers and CUDA installation"
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source libraries
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/state.sh"
+
+# Load configuration
+load_config "$SCRIPT_DIR/config/defaults.env"
+
+log_info "Starting module: $MODULE_DESCRIPTION"
+
+# Check if NVIDIA GPU is present
+check_nvidia_gpu() {
+    log_info "Checking for NVIDIA GPU..."
+    
+    if ! lspci | grep -qi nvidia; then
+        log_warn "No NVIDIA GPU detected"
+        return 1
+    fi
+    
+    log_success "NVIDIA GPU detected:"
+    lspci | grep -i nvidia | head -1 | log_info
+    return 0
+}
+
+# Detect recommended NVIDIA driver version
+detect_nvidia_driver() {
+    log_info "Detecting recommended NVIDIA driver version..."
+    
+    if [ -n "$NVIDIA_DRIVER_VERSION" ] && [ "$NVIDIA_DRIVER_AUTO_DETECT" != "true" ]; then
+        log_info "Using configured driver version: $NVIDIA_DRIVER_VERSION"
+        echo "$NVIDIA_DRIVER_VERSION"
+        return 0
+    fi
+    
+    # Install ubuntu-drivers-common for detection
+    install_packages ubuntu-drivers-common
+    
+    # Method 1: Use ubuntu-drivers to detect recommended driver
+    local recommended_driver=$(ubuntu-drivers devices 2>/dev/null | grep -oP 'driver\s+:\s+\K(nvidia-driver-\d+)' | grep recommended | head -1)
+    
+    # Method 2: Alternative parsing
+    if [ -z "$recommended_driver" ]; then
+        recommended_driver=$(ubuntu-drivers devices 2>/dev/null | grep "recommended" | grep -oP 'nvidia-driver-\d+' | head -1)
+    fi
+    
+    # Method 3: Get latest available if no recommendation
+    if [ -z "$recommended_driver" ]; then
+        log_info "No recommended driver found, finding latest available..."
+        recommended_driver=$(apt-cache search nvidia-driver- | grep -oP 'nvidia-driver-\d+' | sort -V | tail -1)
+    fi
+    
+    if [ -z "$recommended_driver" ]; then
+        log_error "Could not detect any NVIDIA driver"
+        return 1
+    fi
+    
+    log_success "Detected recommended driver: $recommended_driver"
+    echo "$recommended_driver"
+    return 0
+}
+
+# Remove existing NVIDIA installations
+remove_existing_nvidia() {
+    log_info "Removing existing NVIDIA installations..."
+    
+    # Check if NVIDIA drivers are installed
+    if ! dpkg -l | grep -q nvidia-driver; then
+        log_info "No existing NVIDIA drivers found"
+        return 0
+    fi
+    
+    log_info "Found existing NVIDIA installation, removing..."
+    
+    # Stop any NVIDIA services
+    sudo systemctl stop nvidia-persistenced 2>/dev/null || true
+    
+    # Remove NVIDIA packages
+    sudo apt-get remove --purge -y 'nvidia-*' 'libnvidia-*' 'cuda-*' 'libcuda*' 'nvidia-cuda-*' 2>/dev/null || true
+    
+    # Remove NVIDIA configuration files
+    sudo rm -rf /etc/X11/xorg.conf.d/20-nvidia.conf 2>/dev/null || true
+    sudo rm -rf /usr/share/X11/xorg.conf.d/10-nvidia.conf 2>/dev/null || true
+    
+    # Clean up
+    sudo apt-get autoremove -y
+    sudo apt-get autoclean
+    
+    log_success "Existing NVIDIA installation removed"
+    return 0
+}
+
+# Add NVIDIA repository
+add_nvidia_repository() {
+    log_info "Adding NVIDIA repository..."
+    
+    # Add graphics drivers PPA
+    if ! grep -q "graphics-drivers/ppa" /etc/apt/sources.list.d/*.list 2>/dev/null; then
+        sudo add-apt-repository -y ppa:graphics-drivers/ppa
+        log_success "Added graphics drivers PPA"
+    else
+        log_info "Graphics drivers PPA already added"
+    fi
+    
+    # Update package lists
+    retry_with_backoff 3 5 sudo apt-get update
+    
+    return 0
+}
+
+# Install NVIDIA drivers
+install_nvidia_drivers() {
+    log_info "Installing NVIDIA drivers..."
+    
+    # Detect driver version
+    local driver_version=$(detect_nvidia_driver)
+    if [ -z "$driver_version" ]; then
+        log_error "Could not detect NVIDIA driver version"
+        return 1
+    fi
+    
+    # Fix any broken dependencies first
+    sudo apt --fix-broken install -y 2>/dev/null || true
+    
+    # Install the driver
+    log_info "Installing $driver_version..."
+    
+    # Use retry mechanism for driver installation
+    if ! retry_with_backoff 3 10 sudo apt-get install -y "$driver_version"; then
+        log_error "Failed to install $driver_version"
+        
+        # Try cleanup and retry once more
+        log_info "Attempting cleanup and retry..."
+        remove_existing_nvidia
+        add_nvidia_repository
+        
+        if ! sudo apt-get install -y "$driver_version"; then
+            log_error "Driver installation failed after cleanup"
+            return 1
+        fi
+    fi
+    
+    log_success "NVIDIA drivers installed successfully"
+    return 0
+}
+
+# Download and install CUDA toolkit
+install_cuda_toolkit() {
+    log_info "Installing NVIDIA CUDA Toolkit..."
+    
+    local cuda_version="$CUDA_VERSION"
+    local cuda_version_major=$(echo "$cuda_version" | cut -d. -f1)
+    local cuda_version_minor=$(echo "$cuda_version" | cut -d. -f2)
+    local cuda_version_patch=$(echo "$cuda_version" | cut -d. -f3)
+    
+    # Create temp directory
+    local temp_dir="/tmp/cuda-install"
+    mkdir -p "$temp_dir"
+    cd "$temp_dir"
+    
+    # Download CUDA repository pin
+    local pin_url="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin"
+    download_with_retry "$pin_url" "cuda-ubuntu2204.pin"
+    sudo mv cuda-ubuntu2204.pin /etc/apt/preferences.d/cuda-repository-pin-600
+    
+    # Download CUDA repository package
+    local cuda_repo_url="https://developer.download.nvidia.com/compute/cuda/${cuda_version}/local_installers/cuda-repo-ubuntu2204-${cuda_version_major}-${cuda_version_minor}-local_${cuda_version}-*.deb"
+    
+    # Try to find the correct CUDA installer URL
+    local cuda_installer=""
+    for url in \
+        "https://developer.download.nvidia.com/compute/cuda/12.6.2/local_installers/cuda-repo-ubuntu2204-12-6-local_12.6.2-560.35.03-1_amd64.deb" \
+        "https://developer.download.nvidia.com/compute/cuda/12.6.0/local_installers/cuda-repo-ubuntu2204-12-6-local_12.6.0-560.28.03-1_amd64.deb" \
+        "https://developer.download.nvidia.com/compute/cuda/12.5.0/local_installers/cuda-repo-ubuntu2204-12-5-local_12.5.0-555.42.02-1_amd64.deb"; do
+        
+        if curl --head --silent --fail "$url" >/dev/null 2>&1; then
+            cuda_installer="$url"
+            break
+        fi
+    done
+    
+    if [ -z "$cuda_installer" ]; then
+        log_error "Could not find CUDA installer for version $cuda_version"
+        return 1
+    fi
+    
+    log_info "Downloading CUDA installer from: $cuda_installer"
+    local cuda_deb=$(basename "$cuda_installer")
+    download_with_retry "$cuda_installer" "$cuda_deb"
+    
+    # Install CUDA repository
+    sudo dpkg -i "$cuda_deb"
+    
+    # Copy keyring
+    sudo cp /var/cuda-repo-ubuntu2204-*/cuda-*-keyring.gpg /usr/share/keyrings/ 2>/dev/null || true
+    
+    # Update package lists
+    retry_with_backoff 3 5 sudo apt-get update
+    
+    # Install CUDA toolkit
+    log_info "Installing CUDA toolkit packages..."
+    retry_with_backoff 3 10 sudo apt-get install -y cuda-toolkit-${cuda_version_major}-${cuda_version_minor}
+    
+    # Also install nvidia-cuda-toolkit for compatibility
+    retry_with_backoff 3 10 sudo apt-get install -y nvidia-cuda-toolkit
+    
+    # Clean up
+    cd /
+    rm -rf "$temp_dir"
+    
+    log_success "CUDA toolkit installed successfully"
+    return 0
+}
+
+# Download and install cuDNN
+install_cudnn() {
+    log_info "Installing NVIDIA cuDNN..."
+    
+    local cudnn_version="$CUDNN_VERSION"
+    
+    # Create temp directory
+    local temp_dir="/tmp/cudnn-install"
+    mkdir -p "$temp_dir"
+    cd "$temp_dir"
+    
+    # Download cuDNN repository package
+    local cudnn_repo_url="https://developer.download.nvidia.com/compute/cudnn/${cudnn_version}/local_installers/cudnn-local-repo-ubuntu2204-${cudnn_version}_1.0-1_amd64.deb"
+    
+    # Try different cuDNN versions
+    local cudnn_installer=""
+    for url in \
+        "https://developer.download.nvidia.com/compute/cudnn/9.4.0/local_installers/cudnn-local-repo-ubuntu2204-9.4.0_1.0-1_amd64.deb" \
+        "https://developer.download.nvidia.com/compute/cudnn/9.3.0/local_installers/cudnn-local-repo-ubuntu2204-9.3.0_1.0-1_amd64.deb" \
+        "https://developer.download.nvidia.com/compute/cudnn/9.2.0/local_installers/cudnn-local-repo-ubuntu2204-9.2.0_1.0-1_amd64.deb"; do
+        
+        if curl --head --silent --fail "$url" >/dev/null 2>&1; then
+            cudnn_installer="$url"
+            break
+        fi
+    done
+    
+    if [ -z "$cudnn_installer" ]; then
+        log_warn "Could not find cuDNN installer for version $cudnn_version, skipping..."
+        return 0
+    fi
+    
+    log_info "Downloading cuDNN installer from: $cudnn_installer"
+    local cudnn_deb=$(basename "$cudnn_installer")
+    download_with_retry "$cudnn_installer" "$cudnn_deb"
+    
+    # Install cuDNN repository
+    sudo dpkg -i "$cudnn_deb"
+    
+    # Copy keyring (try different possible locations)
+    sudo cp /var/cudnn-local-repo-ubuntu2204-*/cudnn-*-keyring.gpg /usr/share/keyrings/ 2>/dev/null || true
+    
+    # Update package lists
+    retry_with_backoff 3 5 sudo apt-get update
+    
+    # Install cuDNN
+    log_info "Installing cuDNN packages..."
+    retry_with_backoff 3 10 sudo apt-get install -y cudnn
+    
+    # Clean up
+    cd /
+    rm -rf "$temp_dir"
+    
+    log_success "cuDNN installed successfully"
+    return 0
+}
+
+# Configure CUDA environment
+configure_cuda_environment() {
+    log_info "Configuring CUDA environment..."
+    
+    # Find CUDA installation path
+    local cuda_path="/usr/local/cuda"
+    if [ ! -d "$cuda_path" ]; then
+        cuda_path=$(find /usr/local -name "cuda-*" -type d | head -1)
+    fi
+    
+    if [ -z "$cuda_path" ] || [ ! -d "$cuda_path" ]; then
+        log_warn "CUDA installation path not found, skipping environment configuration"
+        return 0
+    fi
+    
+    # Create environment configuration
+    local cuda_env_file="/etc/environment.d/99-cuda.conf"
+    sudo mkdir -p "$(dirname "$cuda_env_file")"
+    
+    sudo tee "$cuda_env_file" > /dev/null << EOF
+CUDA_HOME="$cuda_path"
+PATH="$cuda_path/bin:\$PATH"
+LD_LIBRARY_PATH="$cuda_path/lib64:\$LD_LIBRARY_PATH"
+EOF
+    
+    # Also add to profile for immediate availability
+    local profile_file="/etc/profile.d/cuda.sh"
+    sudo tee "$profile_file" > /dev/null << EOF
+#!/bin/bash
+export CUDA_HOME="$cuda_path"
+export PATH="$cuda_path/bin:\$PATH"
+export LD_LIBRARY_PATH="$cuda_path/lib64:\$LD_LIBRARY_PATH"
+EOF
+    
+    sudo chmod +x "$profile_file"
+    
+    log_success "CUDA environment configured"
+    return 0
+}
+
+# Load NVIDIA kernel modules
+load_nvidia_modules() {
+    log_info "Loading NVIDIA kernel modules..."
+    
+    # Load modules
+    local modules=("nvidia" "nvidia_uvm" "nvidia_drm" "nvidia_modeset")
+    
+    for module in "${modules[@]}"; do
+        if ! lsmod | grep -q "$module"; then
+            if sudo modprobe "$module" 2>/dev/null; then
+                log_success "Loaded module: $module"
+            else
+                log_warn "Failed to load module: $module (may not be available yet)"
+            fi
+        else
+            log_info "Module already loaded: $module"
+        fi
+    done
+    
+    return 0
+}
+
+# Test NVIDIA installation
+test_nvidia_installation() {
+    log_info "Testing NVIDIA installation..."
+    
+    # Check if nvidia-smi is available
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        log_warn "nvidia-smi not found in PATH, may need reboot"
+        return 0
+    fi
+    
+    # Test nvidia-smi
+    if nvidia-smi >/dev/null 2>&1; then
+        log_success "NVIDIA drivers are working!"
+        nvidia-smi | head -3 | log_info
+        return 0
+    else
+        log_warn "NVIDIA drivers installed but not working, reboot required"
+        return 0
+    fi
+}
+
+# Main NVIDIA setup function
+main() {
+    log "Starting NVIDIA setup..."
+    
+    # Check if NVIDIA GPU is present
+    if ! check_nvidia_gpu; then
+        log_warn "No NVIDIA GPU detected, skipping NVIDIA setup"
+        return 0
+    fi
+    
+    # Check Secure Boot status
+    local secure_boot=$(check_secure_boot)
+    if [ "$secure_boot" = "enabled" ]; then
+        log_warn "Secure Boot is enabled - NVIDIA drivers may not work properly"
+        log_warn "Please disable Secure Boot in BIOS for optimal compatibility"
+    fi
+    
+    # Remove existing NVIDIA installations
+    remove_existing_nvidia
+    
+    # Add NVIDIA repository
+    add_nvidia_repository
+    
+    # Install NVIDIA drivers
+    install_nvidia_drivers
+    
+    # Install CUDA toolkit
+    install_cuda_toolkit
+    
+    # Install cuDNN
+    install_cudnn
+    
+    # Configure CUDA environment
+    configure_cuda_environment
+    
+    # Load NVIDIA modules
+    load_nvidia_modules
+    
+    # Test installation
+    test_nvidia_installation
+    
+    # Set reboot requirement
+    log_info "NVIDIA installation complete, reboot required"
+    set_reboot_required "$MODULE_NAME"
+    
+    log_success "NVIDIA setup completed successfully"
+    
+    # Show summary
+    echo
+    echo "NVIDIA Setup Summary:"
+    echo "===================="
+    echo "✓ NVIDIA drivers installed"
+    echo "✓ CUDA toolkit installed"
+    echo "✓ cuDNN installed"
+    echo "✓ CUDA environment configured"
+    echo "⚠ Reboot required for drivers to take effect"
+    echo
+    
+    return 0
+}
+
+# Run main function
+main "$@"

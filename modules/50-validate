@@ -1,0 +1,509 @@
+#!/bin/bash
+# Module 50: Final Validation
+# ===========================
+
+set -euo pipefail
+
+# Module information
+MODULE_NAME="50-validate"
+MODULE_DESCRIPTION="Final validation and system verification"
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source libraries
+source "$SCRIPT_DIR/lib/utils.sh"
+source "$SCRIPT_DIR/lib/state.sh"
+
+# Load configuration
+load_config "$SCRIPT_DIR/config/defaults.env"
+
+log_info "Starting module: $MODULE_DESCRIPTION"
+
+# Validate system services
+validate_system_services() {
+    log_info "Validating system services..."
+    
+    local required_services=(
+        "ssh"
+        "chrony"
+        "tailscaled"
+    )
+    
+    if [ "$ENABLE_WATCHDOG" = "true" ]; then
+        required_services+=("watchdog")
+    fi
+    
+    if [ "$ENABLE_WAKE_ON_LAN" = "true" ]; then
+        required_services+=("wake-on-lan")
+    fi
+    
+    if command -v docker >/dev/null 2>&1; then
+        required_services+=("docker")
+    fi
+    
+    local failed_services=()
+    
+    for service in "${required_services[@]}"; do
+        if systemctl is-active --quiet "$service"; then
+            log_success "Service $service is running"
+        else
+            log_error "Service $service is not running"
+            failed_services+=("$service")
+        fi
+        
+        if systemctl is-enabled --quiet "$service"; then
+            log_success "Service $service is enabled"
+        else
+            log_warn "Service $service is not enabled"
+        fi
+    done
+    
+    if [ ${#failed_services[@]} -gt 0 ]; then
+        log_error "Failed services: ${failed_services[*]}"
+        return 1
+    fi
+    
+    log_success "All required services are running"
+    return 0
+}
+
+# Validate NVIDIA GPU setup
+validate_nvidia_setup() {
+    log_info "Validating NVIDIA GPU setup..."
+    
+    # Check if NVIDIA GPU is present
+    if ! lspci | grep -qi nvidia; then
+        log_info "No NVIDIA GPU detected, skipping NVIDIA validation"
+        return 0
+    fi
+    
+    # Check if NVIDIA drivers are installed
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        log_error "NVIDIA drivers not found (nvidia-smi not available)"
+        return 1
+    fi
+    
+    # Test nvidia-smi
+    if ! nvidia-smi >/dev/null 2>&1; then
+        log_error "nvidia-smi is not working properly"
+        return 1
+    fi
+    
+    log_success "NVIDIA drivers are working"
+    
+    # Get GPU information
+    local gpu_info=$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader | head -1)
+    log_info "GPU: $gpu_info"
+    
+    # Test CUDA if available
+    if command -v nvcc >/dev/null 2>&1; then
+        local cuda_version=$(nvcc --version | grep "release" | awk '{print $6}' | cut -d',' -f1)
+        log_success "CUDA is available: $cuda_version"
+    else
+        log_warn "CUDA toolkit not found in PATH"
+    fi
+    
+    return 0
+}
+
+# Validate Docker setup
+validate_docker_setup() {
+    log_info "Validating Docker setup..."
+    
+    # Check if Docker is installed
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "Docker is not installed"
+        return 1
+    fi
+    
+    # Check Docker daemon
+    if ! docker version >/dev/null 2>&1; then
+        log_error "Docker daemon is not running"
+        return 1
+    fi
+    
+    log_success "Docker is installed and running"
+    
+    # Test basic Docker functionality
+    if docker run --rm hello-world >/dev/null 2>&1; then
+        log_success "Docker basic functionality test passed"
+    else
+        log_error "Docker basic functionality test failed"
+        return 1
+    fi
+    
+    # Test Docker GPU support if NVIDIA is present
+    if [ "$REQUIRE_DOCKER_GPU_VALIDATION" = "true" ] && command -v nvidia-smi >/dev/null 2>&1; then
+        log_info "Testing Docker GPU support..."
+        
+        if docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+            log_success "Docker GPU support test passed"
+        else
+            log_error "Docker GPU support test failed"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Validate network configuration
+validate_network_config() {
+    log_info "Validating network configuration..."
+    
+    # Check internet connectivity
+    if ! check_internet; then
+        log_error "Internet connectivity test failed"
+        return 1
+    fi
+    
+    log_success "Internet connectivity is working"
+    
+    # Check DNS resolution
+    if ! nslookup google.com >/dev/null 2>&1; then
+        log_error "DNS resolution test failed"
+        return 1
+    fi
+    
+    log_success "DNS resolution is working"
+    
+    # Check SSH service
+    if ! systemctl is-active --quiet ssh; then
+        log_error "SSH service is not running"
+        return 1
+    fi
+    
+    log_success "SSH service is running"
+    
+    # Test SSH connectivity (if possible)
+    local ssh_port=$(grep -E "^Port" /etc/ssh/sshd_config.d/99-deployment-tower.conf | awk '{print $2}' || echo "22")
+    if netstat -tlnp | grep ":$ssh_port " >/dev/null 2>&1; then
+        log_success "SSH is listening on port $ssh_port"
+    else
+        log_warn "SSH may not be listening on configured port $ssh_port"
+    fi
+    
+    # Check Tailscale
+    if command -v tailscale >/dev/null 2>&1; then
+        local tailscale_status=$(tailscale status 2>/dev/null | head -1 || echo "Not connected")
+        log_info "Tailscale status: $tailscale_status"
+        
+        if echo "$tailscale_status" | grep -q "logged in"; then
+            log_success "Tailscale is connected"
+        else
+            log_info "Tailscale is installed but not connected"
+        fi
+    else
+        log_warn "Tailscale is not installed"
+    fi
+    
+    return 0
+}
+
+# Validate system resources
+validate_system_resources() {
+    log_info "Validating system resources..."
+    
+    # Check memory
+    local mem_gb=$(free -g | awk 'NR==2{print $2}')
+    if [ "$mem_gb" -lt 4 ]; then
+        log_warn "Low memory: ${mem_gb}GB (minimum 4GB recommended)"
+    else
+        log_success "Memory: ${mem_gb}GB"
+    fi
+    
+    # Check disk space
+    local disk_gb=$(df -BG / | awk 'NR==2 {print int($4)}')
+    if [ "$disk_gb" -lt 20 ]; then
+        log_warn "Low disk space: ${disk_gb}GB available (minimum 20GB recommended)"
+    else
+        log_success "Disk space: ${disk_gb}GB available"
+    fi
+    
+    # Check CPU
+    local cpu_cores=$(nproc)
+    log_info "CPU cores: $cpu_cores"
+    
+    # Check load average
+    local load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',')
+    log_info "Current load average: $load_avg"
+    
+    # Check swap
+    local swap_total=$(free -h | grep Swap | awk '{print $2}')
+    local swap_used=$(free -h | grep Swap | awk '{print $3}')
+    log_info "Swap: $swap_used/$swap_total used"
+    
+    return 0
+}
+
+# Validate configuration files
+validate_configuration() {
+    log_info "Validating configuration files..."
+    
+    local config_files=(
+        "/etc/sysctl.d/99-deployment-tower.conf"
+        "/etc/ssh/sshd_config.d/99-deployment-tower.conf"
+        "/etc/security/limits.d/99-deployment-tower.conf"
+    )
+    
+    if [ "$ENABLE_WATCHDOG" = "true" ]; then
+        config_files+=("/etc/watchdog.conf")
+    fi
+    
+    if command -v docker >/dev/null 2>&1; then
+        config_files+=("/etc/docker/daemon.json")
+    fi
+    
+    for config_file in "${config_files[@]}"; do
+        if [ -f "$config_file" ]; then
+            log_success "Configuration file exists: $config_file"
+        else
+            log_warn "Configuration file missing: $config_file"
+        fi
+    done
+    
+    return 0
+}
+
+# Validate security settings
+validate_security() {
+    log_info "Validating security settings..."
+    
+    # Check Secure Boot status
+    local secure_boot=$(check_secure_boot)
+    case "$secure_boot" in
+        "enabled")
+            log_warn "Secure Boot is enabled - may cause issues with NVIDIA drivers"
+            ;;
+        "disabled")
+            log_success "Secure Boot is disabled"
+            ;;
+        *)
+            log_info "Secure Boot status: $secure_boot"
+            ;;
+    esac
+    
+    # Check firewall status
+    if command -v ufw >/dev/null 2>&1; then
+        if ufw status | grep -q "Status: active"; then
+            log_success "Firewall is active"
+        else
+            log_warn "Firewall is not active"
+        fi
+    else
+        log_warn "UFW firewall not installed"
+    fi
+    
+    # Check automatic updates status
+    if [ "$DISABLE_AUTOMATIC_UPDATES" = "true" ]; then
+        if systemctl is-active --quiet unattended-upgrades; then
+            log_warn "Automatic updates are still running (should be disabled)"
+        else
+            log_success "Automatic updates are disabled"
+        fi
+    fi
+    
+    return 0
+}
+
+# Generate validation report
+generate_validation_report() {
+    log_info "Generating validation report..."
+    
+    local report_file="$STATE_DIR/validation_report.json"
+    local timestamp=$(date -Iseconds)
+    
+    # Get system information
+    local system_info=$(get_system_info)
+    
+    # Create validation report
+    cat > "$report_file" << EOF
+{
+    "validation_timestamp": "$timestamp",
+    "validation_version": "1.0",
+    "system_info": $system_info,
+    "validation_results": {
+        "system_services": "$(validate_system_services && echo "passed" || echo "failed")",
+        "nvidia_setup": "$(validate_nvidia_setup && echo "passed" || echo "failed")",
+        "docker_setup": "$(validate_docker_setup && echo "passed" || echo "failed")",
+        "network_config": "$(validate_network_config && echo "passed" || echo "failed")",
+        "system_resources": "$(validate_system_resources && echo "passed" || echo "failed")",
+        "configuration": "$(validate_configuration && echo "passed" || echo "failed")",
+        "security": "$(validate_security && echo "passed" || echo "failed")"
+    },
+    "recommendations": [
+        "Connect to Tailscale: sudo tailscale up",
+        "Test GPU: nvidia-smi",
+        "Test Docker GPU: docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi",
+        "Check firewall: sudo ufw status",
+        "Monitor logs: journalctl -f"
+    ]
+}
+EOF
+    
+    log_success "Validation report saved to: $report_file"
+    return 0
+}
+
+# Show final system status
+show_final_status() {
+    log_info "Final system status:"
+    
+    echo
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "                    SYSTEM VALIDATION COMPLETE"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo
+    
+    # System Information
+    echo "System Information:"
+    echo "==================="
+    echo "Hostname: $(hostname)"
+    echo "IP Address: $(ip -4 addr show $(ip route | grep default | awk '{print $5}' | head -n1) | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)"
+    echo "MAC Address: $(ip link show $(ip route | grep default | awk '{print $5}' | head -n1) | grep -oP '(?<=link/ether\s)[a-fA-F0-9:]+' | head -n1)"
+    echo "Ubuntu Version: $(lsb_release -d | cut -f2 | tr -d '"')"
+    echo "Kernel: $(uname -r)"
+    echo "Memory: $(free -h | grep "^Mem:" | awk '{print $2}')"
+    echo "Disk: $(df -h / | awk 'NR==2 {print $2}')"
+    echo "Timezone: $(timedatectl | grep "Time zone" | awk '{print $3}')"
+    echo
+    
+    # NVIDIA Information
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+        echo "NVIDIA GPU Information:"
+        echo "======================"
+        nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader | while IFS=',' read -r name driver memory; do
+            echo "GPU: $name"
+            echo "Driver: $driver"
+            echo "Memory: $memory"
+        done
+        echo
+    fi
+    
+    # Docker Information
+    if command -v docker >/dev/null 2>&1; then
+        echo "Docker Information:"
+        echo "=================="
+        docker version --format 'Version: {{.Server.Version}}'
+        docker system info --format 'Runtime: {{.DefaultRuntime}}'
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            echo "GPU Support: Available"
+        else
+            echo "GPU Support: Not Available"
+        fi
+        echo
+    fi
+    
+    # Network Information
+    echo "Network Information:"
+    echo "==================="
+    echo "SSH Port: $(grep -E "^Port" /etc/ssh/sshd_config.d/99-deployment-tower.conf | awk '{print $2}' || echo "22")"
+    
+    if command -v tailscale >/dev/null 2>&1; then
+        echo "Tailscale: Installed"
+        if tailscale status >/dev/null 2>&1; then
+            echo "Tailscale Status: Connected"
+        else
+            echo "Tailscale Status: Not Connected"
+        fi
+    else
+        echo "Tailscale: Not Installed"
+    fi
+    
+    if [ "$ENABLE_WAKE_ON_LAN" = "true" ]; then
+        echo "Wake-on-LAN: Enabled"
+    else
+        echo "Wake-on-LAN: Disabled"
+    fi
+    
+    echo
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "                         NEXT STEPS"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo
+    echo "1. Connect to Tailscale (if not already connected):"
+    echo "   sudo tailscale up"
+    echo
+    echo "2. Test GPU functionality:"
+    echo "   nvidia-smi"
+    echo
+    echo "3. Test Docker GPU support:"
+    echo "   docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi"
+    echo
+    echo "4. Check system status:"
+    echo "   systemctl status docker tailscaled ssh"
+    echo
+    echo "5. Monitor system logs:"
+    echo "   journalctl -f"
+    echo
+    echo "═══════════════════════════════════════════════════════════════"
+    echo
+}
+
+# Main validation function
+main() {
+    log "Starting final validation..."
+    
+    local validation_failed=false
+    
+    # Run all validations
+    if ! validate_system_services; then
+        validation_failed=true
+    fi
+    
+    if ! validate_nvidia_setup; then
+        validation_failed=true
+    fi
+    
+    if ! validate_docker_setup; then
+        validation_failed=true
+    fi
+    
+    if ! validate_network_config; then
+        validation_failed=true
+    fi
+    
+    if ! validate_system_resources; then
+        validation_failed=true
+    fi
+    
+    if ! validate_configuration; then
+        validation_failed=true
+    fi
+    
+    if ! validate_security; then
+        validation_failed=true
+    fi
+    
+    # Generate report
+    generate_validation_report
+    
+    # Show final status
+    show_final_status
+    
+    if [ "$validation_failed" = true ]; then
+        log_error "Some validation checks failed - please review the issues above"
+        return 1
+    fi
+    
+    log_success "All validation checks passed!"
+    
+    echo
+    echo "Validation Summary:"
+    echo "=================="
+    echo "✓ System services validated"
+    echo "✓ NVIDIA setup validated"
+    echo "✓ Docker setup validated"
+    echo "✓ Network configuration validated"
+    echo "✓ System resources validated"
+    echo "✓ Configuration files validated"
+    echo "✓ Security settings validated"
+    echo "✓ Validation report generated"
+    echo
+    
+    return 0
+}
+
+# Run main function
+main "$@"
