@@ -229,7 +229,7 @@ configure_docker_compose() {
     # Test Docker Compose
     if docker-compose --version >/dev/null 2>&1; then
         log_success "Docker Compose is working"
-        docker-compose --version | log_info
+        log_info "$(docker-compose --version)"
     else
         log_error "Docker Compose is not working"
         return 1
