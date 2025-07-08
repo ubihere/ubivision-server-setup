@@ -7,7 +7,7 @@ set -euo pipefail
 
 # Configuration
 REPOSITORY_URL="https://github.com/ubihere/ubivision-server-setup.git"
-BRANCH="main"
+BRANCH="master"
 INSTALL_DIR="/opt/ubivision-server-setup"
 TEMP_DIR="/tmp/ubivision-server-setup-install"
 
