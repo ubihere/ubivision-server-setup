@@ -99,7 +99,7 @@ expand_storage() {
     
     # Show final disk usage
     log_info "Final disk usage:"
-    df -h / | log_info
+    log_info "$(df -h /)"
     
     return 0
 }
