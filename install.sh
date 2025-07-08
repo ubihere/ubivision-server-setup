@@ -70,11 +70,18 @@ if ! lsb_release -a 2>/dev/null | grep -q "Ubuntu 22.04"; then
     log_warn "This script is designed for Ubuntu 22.04. Your system:"
     lsb_release -a 2>/dev/null | grep "Description:" || echo "Unknown distribution"
     
-    read -p "Continue anyway? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log_error "Installation cancelled"
-        exit 1
+    # Check if running in non-interactive mode (e.g., via curl | bash)
+    if [[ -t 0 ]]; then
+        # Interactive mode - prompt user
+        read -p "Continue anyway? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_error "Installation cancelled"
+            exit 1
+        fi
+    else
+        # Non-interactive mode - continue with warning
+        log_warn "Running in non-interactive mode - continuing on unsupported Ubuntu version"
     fi
 fi
 
@@ -89,14 +96,23 @@ fi
 if [ -d "$INSTALL_DIR" ]; then
     log_warn "Existing installation found at $INSTALL_DIR"
     
-    read -p "Remove existing installation and continue? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
+    # Check if running in non-interactive mode (e.g., via curl | bash)
+    if [[ -t 0 ]]; then
+        # Interactive mode - prompt user
+        read -p "Remove existing installation and continue? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Removing existing installation..."
+            sudo rm -rf "$INSTALL_DIR"
+        else
+            log_error "Installation cancelled"
+            exit 1
+        fi
+    else
+        # Non-interactive mode - automatically overwrite with warning
+        log_warn "Running in non-interactive mode - automatically overwriting existing installation"
         log_info "Removing existing installation..."
         sudo rm -rf "$INSTALL_DIR"
-    else
-        log_error "Installation cancelled"
-        exit 1
     fi
 fi
 
