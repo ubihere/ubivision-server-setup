@@ -13,24 +13,37 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
+# Ensure log directory exists
+ensure_log_dir() {
+    if [ -n "${LOG_DIR:-}" ] && [ ! -d "$LOG_DIR" ]; then
+        sudo mkdir -p "$LOG_DIR"
+        sudo chown -R "$USER:$USER" "$LOG_DIR" 2>/dev/null || true
+    fi
+}
+
 # Logging functions
 log() {
+    ensure_log_dir
     echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')] $1${NC}" | tee -a "$LOG_DIR/deployment.log"
 }
 
 log_info() {
+    ensure_log_dir
     echo -e "${BLUE}[INFO] $1${NC}" | tee -a "$LOG_DIR/deployment.log"
 }
 
 log_warn() {
+    ensure_log_dir
     echo -e "${YELLOW}[WARN] $1${NC}" | tee -a "$LOG_DIR/deployment.log"
 }
 
 log_error() {
+    ensure_log_dir
     echo -e "${RED}[ERROR] $1${NC}" | tee -a "$LOG_DIR/deployment.log"
 }
 
 log_success() {
+    ensure_log_dir
     echo -e "${GREEN}[SUCCESS] $1${NC}" | tee -a "$LOG_DIR/deployment.log"
 }
 
