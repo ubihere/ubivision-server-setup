@@ -327,6 +327,8 @@ setup_github_ssh() {
         
         if echo "$response" | grep -q "\"id\""; then
             log_success "SSH key successfully added to GitHub!"
+        elif echo "$response" | grep -q "key is already in use"; then
+            log_success "SSH key already exists on GitHub account!"
         else
             log_error "Failed to add SSH key to GitHub"
             echo "Response: $response"
