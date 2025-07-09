@@ -29,7 +29,7 @@ install_tailscale() {
     # Check if Tailscale is already installed
     if command -v tailscale >/dev/null 2>&1; then
         log_info "Tailscale is already installed"
-        tailscale version | log_info
+        log_info "$(tailscale version)"
         return 0
     fi
     
@@ -339,11 +339,13 @@ setup_github_ssh() {
     git config --global user.email "$(whoami)@$(hostname)"
     
     # Test the connection
-    if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+    log_info "Testing GitHub SSH connection..."
+    if ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
         log_success "GitHub SSH connection verified!"
     else
-        log_warn "GitHub SSH connection test failed"
-        return 1
+        log_warn "GitHub SSH connection test failed - this may be normal immediately after adding the key"
+        log_info "You can test manually later with: ssh -T git@github.com"
+        # Don't fail the module - SSH key was successfully added
     fi
     
     return 0
