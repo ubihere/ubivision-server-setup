@@ -41,10 +41,18 @@ if [[ $EUID -eq 0 ]]; then
     exit 1
 fi
 
-# Check sudo privileges
+# Check sudo privileges and setup passwordless sudo if needed
 if ! sudo -n true 2>/dev/null; then
-    log_error "This script requires sudo privileges. Please ensure you have sudo access."
-    exit 1
+    log_info "Setting up passwordless sudo for current user..."
+    echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/$USER > /dev/null
+    
+    # Verify sudo is now working
+    if ! sudo -n true 2>/dev/null; then
+        log_error "Failed to configure passwordless sudo. Please check your sudo configuration."
+        exit 1
+    fi
+    
+    log_info "Passwordless sudo configured successfully"
 fi
 
 # Banner
