@@ -22,28 +22,6 @@ source "$SCRIPT_DIR/lib/state.sh"
 
 log_info "Starting module: $MODULE_DESCRIPTION"
 
-# Configure hostname
-configure_hostname() {
-    log_info "Configuring hostname..."
-    
-    local current_hostname=$(hostname)
-    local new_hostname="${HOSTNAME_PREFIX}-$(date +%s)"
-    
-    if [[ "$current_hostname" == "$HOSTNAME_PREFIX"* ]]; then
-        log_success "Hostname already configured: $current_hostname"
-        return 0
-    fi
-    
-    # Set hostname
-    sudo hostnamectl set-hostname "$new_hostname"
-    
-    # Update /etc/hosts
-    backup_file "/etc/hosts"
-    sudo sed -i "s/127.0.1.1.*/127.0.1.1\t$new_hostname/" /etc/hosts
-    
-    log_success "Hostname set to: $new_hostname"
-    return 0
-}
 
 # Expand storage
 expand_storage() {
@@ -373,7 +351,6 @@ main() {
     log "Starting system setup..."
     
     # Run all system setup steps
-    configure_hostname
     expand_storage
     configure_swap
     configure_time_sync
@@ -389,7 +366,6 @@ main() {
     echo
     echo "System Setup Summary:"
     echo "===================="
-    echo "✓ Hostname configured"
     echo "✓ Storage expanded"
     echo "✓ Swap file created"
     echo "✓ Time synchronization configured"

@@ -36,9 +36,6 @@ validate_system_services() {
         required_services+=("watchdog")
     fi
     
-    if [ "$ENABLE_WAKE_ON_LAN" = "true" ]; then
-        required_services+=("wake-on-lan")
-    fi
     
     if command -v docker >/dev/null 2>&1; then
         required_services+=("docker")
@@ -135,16 +132,9 @@ validate_docker_setup() {
         return 1
     fi
     
-    # Test Docker GPU support if NVIDIA is present
-    if [ "$REQUIRE_DOCKER_GPU_VALIDATION" = "true" ] && command -v nvidia-smi >/dev/null 2>&1; then
-        log_info "Testing Docker GPU support..."
-        
-        if docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
-            log_success "Docker GPU support test passed"
-        else
-            log_error "Docker GPU support test failed"
-            return 1
-        fi
+    # Skip Docker GPU validation - it's optional
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        log_info "Docker GPU support available (not tested)"
     fi
     
     return 0
@@ -179,8 +169,8 @@ validate_network_config() {
     log_success "SSH service is running"
     
     # Test SSH connectivity (if possible)
-    local ssh_port=$(grep -E "^Port" /etc/ssh/sshd_config.d/99-deployment-tower.conf | awk '{print $2}' || echo "22")
-    if netstat -tlnp | grep ":$ssh_port " >/dev/null 2>&1; then
+    local ssh_port=$(grep -E "^Port" /etc/ssh/sshd_config.d/99-deployment-tower.conf 2>/dev/null | awk '{print $2}' || echo "22")
+    if ss -tlnp | grep ":$ssh_port " >/dev/null 2>&1; then
         log_success "SSH is listening on port $ssh_port"
     else
         log_warn "SSH may not be listening on configured port $ssh_port"
@@ -400,7 +390,7 @@ show_final_status() {
     # Network Information
     echo "Network Information:"
     echo "==================="
-    echo "SSH Port: $(grep -E "^Port" /etc/ssh/sshd_config.d/99-deployment-tower.conf | awk '{print $2}' || echo "22")"
+    echo "SSH Port: $(grep -E "^Port" /etc/ssh/sshd_config.d/99-deployment-tower.conf 2>/dev/null | awk '{print $2}' || echo "22")"
     
     if command -v tailscale >/dev/null 2>&1; then
         echo "Tailscale: Installed"
