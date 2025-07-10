@@ -32,7 +32,7 @@ check_nvidia_gpu() {
     fi
     
     log_success "NVIDIA GPU detected:"
-    lspci | grep -i nvidia | head -1 | log_info
+    log_info "$(lspci | grep -i nvidia | head -1)"
     return 0
 }
 
@@ -46,8 +46,8 @@ detect_nvidia_driver() {
         return 0
     fi
     
-    # Install ubuntu-drivers-common for detection
-    install_packages ubuntu-drivers-common
+    # Install ubuntu-drivers-common for detection (redirect output to avoid capture)
+    install_packages ubuntu-drivers-common >&2
     
     # Method 1: Use ubuntu-drivers to detect recommended driver
     local recommended_driver=$(ubuntu-drivers devices 2>/dev/null | grep -oP 'driver\s+:\s+\K(nvidia-driver-\d+)' | grep recommended | head -1)
@@ -357,7 +357,7 @@ test_nvidia_installation() {
     # Test nvidia-smi
     if nvidia-smi >/dev/null 2>&1; then
         log_success "NVIDIA drivers are working!"
-        nvidia-smi | head -3 | log_info
+        log_info "$(nvidia-smi | head -3)"
         return 0
     else
         log_warn "NVIDIA drivers installed but not working, reboot required"
