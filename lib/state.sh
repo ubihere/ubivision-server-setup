@@ -209,8 +209,8 @@ set_reboot_required() {
     
     if command -v jq >/dev/null 2>&1; then
         local temp_file=$(mktemp)
-        jq --arg module "$module" --arg required "$required" --arg timestamp "$(date -Iseconds)" \
-           '.last_updated = $timestamp | .reboot_required = ($required | test("true")) | .reboot_module = $module' \
+        jq --arg mod "$module" --arg required "$required" --arg timestamp "$(date -Iseconds)" \
+           '.last_updated = $timestamp | .reboot_required = ($required | test("true")) | .reboot_module = $mod' \
            "$STATE_FILE" > "$temp_file" && mv "$temp_file" "$STATE_FILE"
     fi
 }
