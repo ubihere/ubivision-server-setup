@@ -38,10 +38,10 @@ check_nvidia_gpu() {
 
 # Detect recommended NVIDIA driver version
 detect_nvidia_driver() {
-    log_info "Detecting recommended NVIDIA driver version..."
+    log_info "Detecting recommended NVIDIA driver version..." >&2
     
     if [ -n "$NVIDIA_DRIVER_VERSION" ] && [ "$NVIDIA_DRIVER_AUTO_DETECT" != "true" ]; then
-        log_info "Using configured driver version: $NVIDIA_DRIVER_VERSION"
+        log_info "Using configured driver version: $NVIDIA_DRIVER_VERSION" >&2
         echo "$NVIDIA_DRIVER_VERSION"
         return 0
     fi
@@ -59,16 +59,16 @@ detect_nvidia_driver() {
     
     # Method 3: Get latest available if no recommendation
     if [ -z "$recommended_driver" ]; then
-        log_info "No recommended driver found, finding latest available..."
+        log_info "No recommended driver found, finding latest available..." >&2
         recommended_driver=$(apt-cache search nvidia-driver- | grep -oP 'nvidia-driver-\d+' | sort -V | tail -1)
     fi
     
     if [ -z "$recommended_driver" ]; then
-        log_error "Could not detect any NVIDIA driver"
+        log_error "Could not detect any NVIDIA driver" >&2
         return 1
     fi
     
-    log_success "Detected recommended driver: $recommended_driver"
+    log_success "Detected recommended driver: $recommended_driver" >&2
     echo "$recommended_driver"
     return 0
 }
