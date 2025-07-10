@@ -220,27 +220,17 @@ interval = 10
 realtime = yes
 priority = 1
 
-# System load monitoring
-max-load-1 = 24
-max-load-5 = 18
-max-load-15 = 12
+# System load monitoring - High thresholds for camera processing server
+max-load-1 = 30.0
+max-load-5 = 28.0
+max-load-15 = 26.0
 
-# Memory monitoring
-min-memory = 1
-allocatable-memory = 1
+# Memory monitoring - Minimal threshold to prevent OOM
+min-memory = 512
 
-# Network monitoring
-interface = $primary_interface
-ping = 8.8.8.8
-ping-count = 3
+# Temperature monitoring - Conservative for sustained workloads
+temperature = 90
 
-# Process monitoring
-pidfile = /var/run/docker.pid
-pidfile = /var/run/tailscaled.pid
-
-# File system monitoring
-file = /var/log/syslog
-change = 1407
 EOF
     
     # Enable hardware watchdog in kernel
@@ -353,41 +343,6 @@ setup_github_ssh() {
     return 0
 }
 
-# Configure firewall
-configure_firewall() {
-    log_info "Configuring firewall..."
-    
-    # Install ufw if not present
-    install_packages ufw
-    
-    # Reset firewall to defaults
-    sudo ufw --force reset
-    
-    # Set default policies
-    sudo ufw default deny incoming
-    sudo ufw default allow outgoing
-    
-    # Allow SSH
-    sudo ufw allow "$SSH_PORT"/tcp comment "SSH"
-    
-    # Allow Docker swarm ports if Docker is installed
-    if command -v docker >/dev/null 2>&1; then
-        sudo ufw allow 2377/tcp comment "Docker swarm cluster management"
-        sudo ufw allow 7946/tcp comment "Docker swarm node communication"
-        sudo ufw allow 7946/udp comment "Docker swarm node communication"
-        sudo ufw allow 4789/udp comment "Docker swarm overlay network"
-    fi
-    
-    # Allow common services
-    sudo ufw allow 80/tcp comment "HTTP"
-    sudo ufw allow 443/tcp comment "HTTPS"
-    
-    # Enable firewall
-    sudo ufw --force enable
-    
-    log_success "Firewall configured and enabled"
-    return 0
-}
 
 # Configure network performance
 configure_network_performance() {
@@ -441,8 +396,6 @@ main() {
     # Setup GitHub SSH access
     setup_github_ssh
     
-    # Configure firewall
-    configure_firewall
     
     # Configure network performance
     configure_network_performance
