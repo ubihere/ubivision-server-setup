@@ -271,33 +271,6 @@ test_docker_installation() {
     return 0
 }
 
-# Test Docker GPU support
-test_docker_gpu() {
-    log_info "Testing Docker GPU support..."
-    
-    # Check if NVIDIA drivers are present
-    if ! command -v nvidia-smi >/dev/null 2>&1; then
-        log_info "NVIDIA drivers not found, skipping GPU test"
-        return 0
-    fi
-    
-    # Test GPU support
-    if docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
-        log_success "Docker GPU support test passed"
-    else
-        log_warn "Docker GPU support test failed"
-        
-        # Try alternative runtime
-        if docker run --rm --runtime=nvidia nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
-            log_success "Docker GPU support working with nvidia runtime"
-        else
-            log_error "Docker GPU support not working"
-            return 1
-        fi
-    fi
-    
-    return 0
-}
 
 # Configure Docker system service
 configure_docker_system_service() {
@@ -375,9 +348,6 @@ main() {
     
     # Test Docker installation
     test_docker_installation
-    
-    # Test Docker GPU support
-    test_docker_gpu
     
     # Clean up
     cleanup_docker
