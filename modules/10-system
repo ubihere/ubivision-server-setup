@@ -346,6 +346,64 @@ EOF
     return 0
 }
 
+# Disable Intel Turbo Boost
+disable_turbo_boost() {
+    log_info "Configuring Intel Turbo Boost settings..."
+    
+    # Check if Intel CPU
+    if ! grep -q "Intel" /proc/cpuinfo; then
+        log_info "Non-Intel CPU detected, skipping turbo boost configuration"
+        return 0
+    fi
+    
+    # Check if intel_pstate driver is available
+    if [ ! -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+        log_info "Intel P-State driver not available, skipping turbo boost configuration"
+        return 0
+    fi
+    
+    # Create systemd service to disable turbo boost
+    local service_name="disable-turbo-boost.service"
+    local service_path="/etc/systemd/system/${service_name}"
+    
+    log_info "Creating systemd service to disable Intel Turbo Boost..."
+    
+    sudo tee "${service_path}" > /dev/null << 'EOF'
+[Unit]
+Description=Disable Intel Turbo Boost for UbiVision
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo'
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    # Set proper permissions
+    sudo chmod 644 "${service_path}"
+    
+    # Reload systemd
+    sudo systemctl daemon-reload
+    
+    # Enable and start service
+    enable_and_start_service "${service_name%.service}"
+    
+    # Verify turbo boost is disabled
+    if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+        local turbo_status=$(cat /sys/devices/system/cpu/intel_pstate/no_turbo)
+        if [ "$turbo_status" = "1" ]; then
+            log_success "Intel Turbo Boost disabled successfully"
+        else
+            log_warn "Failed to disable Intel Turbo Boost"
+        fi
+    fi
+    
+    return 0
+}
+
 # Main system setup function
 main() {
     log "Starting system setup..."
@@ -359,6 +417,7 @@ main() {
     install_essential_packages
     configure_ssh
     configure_system_limits
+    disable_turbo_boost
     
     log_success "System setup completed successfully"
     
@@ -374,6 +433,7 @@ main() {
     echo "✓ Essential packages installed"
     echo "✓ SSH server configured"
     echo "✓ System limits configured"
+    echo "✓ Intel Turbo Boost disabled (if applicable)"
     echo
     
     return 0
